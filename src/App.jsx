@@ -3,7 +3,7 @@ import { Leaf, Plus, Trash2, Camera, Download, ChevronLeft, ChevronRight, Save, 
 
 import { storage } from './lib/storage';
 import { compressImage } from './lib/imageCompress';
-import { formatTreeText, exportJSON } from './lib/exportHelpers';
+import { formatTreeText, exportJSON, exportXLSX, exportZIP, loadAllTreesWithPhotos } from './lib/exportHelpers';
 import { STORAGE, WINDOW_SIZE, SAVE_DEBOUNCE_MS, PLANTING_FORMS, STAKE_STATES } from './config/constants';
 
 import Section from './components/Section';
@@ -14,6 +14,7 @@ import PhotoCard from './components/PhotoCard';
 import PhotoViewer from './components/PhotoViewer';
 import ExportModal from './components/ExportModal';
 import SurveyMetaPanel from './components/SurveyMetaPanel';
+import JudgmentPanel from './components/JudgmentPanel';
 
 const emptyMeta = (id) => ({
   id,
@@ -28,6 +29,9 @@ const emptyMeta = (id) => ({
   vitalityKei: '',
   memo: '',
   photoIds: [],
+  vitalityJudgment: '',
+  partJudgments: { 根元: '', 幹: '', 大枝: '' },
+  appearanceJudgment: '',
   createdAt: new Date().toISOString(),
 });
 
@@ -112,28 +116,35 @@ export default function App() {
   };
 
   const loadOrMigrateMeta = async (id) => {
+    let meta = null;
     try {
       const r = await storage.get(STORAGE.treeData(id));
-      if (r) return JSON.parse(r.value);
+      if (r) meta = JSON.parse(r.value);
     } catch {}
-    try {
-      const r = await storage.get(STORAGE.treeOld(id));
-      if (r) {
-        const old = JSON.parse(r.value);
-        const photos = old.photos || [];
-        for (const photo of photos) {
-          try {
-            await storage.set(STORAGE.treePhoto(id, photo.id), JSON.stringify(photo));
-          } catch (e) { console.error('Migrate photo error', e); }
+    if (!meta) {
+      try {
+        const r = await storage.get(STORAGE.treeOld(id));
+        if (r) {
+          const old = JSON.parse(r.value);
+          const photos = old.photos || [];
+          for (const photo of photos) {
+            try {
+              await storage.set(STORAGE.treePhoto(id, photo.id), JSON.stringify(photo));
+            } catch (e) { console.error('Migrate photo error', e); }
+          }
+          const { photos: _, ...rest } = old;
+          meta = { ...rest, photoIds: photos.map(p => p.id) };
+          await storage.set(STORAGE.treeData(id), JSON.stringify(meta));
+          try { await storage.delete(STORAGE.treeOld(id)); } catch {}
         }
-        const { photos: _, ...rest } = old;
-        const meta = { ...rest, photoIds: photos.map(p => p.id) };
-        await storage.set(STORAGE.treeData(id), JSON.stringify(meta));
-        try { await storage.delete(STORAGE.treeOld(id)); } catch {}
-        return meta;
-      }
-    } catch {}
-    return null;
+      } catch {}
+    }
+    if (!meta) return null;
+    // 新フィールドのデフォルト補完
+    if (meta.vitalityJudgment === undefined) meta.vitalityJudgment = '';
+    if (!meta.partJudgments) meta.partJudgments = { 根元: '', 幹: '', 大枝: '' };
+    if (meta.appearanceJudgment === undefined) meta.appearanceJudgment = '';
+    return meta;
   };
 
   const loadPhotosForTree = async (id) => {
@@ -398,6 +409,20 @@ export default function App() {
     setShowExport(false);
   }, [flushAllSaves, surveyMeta]);
 
+  const handleExportXLSX = useCallback(async () => {
+    flushAllSaves();
+    const fullTrees = await loadAllTreesWithPhotos(treeIdsRef.current, allMetaRef.current, loadedPhotosRef.current);
+    await exportXLSX(fullTrees, surveyMeta);
+    setShowExport(false);
+  }, [flushAllSaves, surveyMeta]);
+
+  const handleExportZIP = useCallback(async () => {
+    flushAllSaves();
+    const fullTrees = await loadAllTreesWithPhotos(treeIdsRef.current, allMetaRef.current, loadedPhotosRef.current);
+    await exportZIP(fullTrees, surveyMeta);
+    setShowExport(false);
+  }, [flushAllSaves, surveyMeta]);
+
   const copyText = useCallback(async (which) => {
     flushAllSaves();
     let text = '';
@@ -563,6 +588,10 @@ export default function App() {
           </p>
         </Section>
 
+        <Section title="診断判定">
+          <JudgmentPanel meta={currentMeta} onChange={updateCurrent} />
+        </Section>
+
         <Section title={`写真 (${currentPhotos.length}枚)`}>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
             {currentPhotos.map((p) => (
@@ -610,6 +639,8 @@ export default function App() {
           treeCount={treeIds.length}
           totalPhotos={totalPhotos}
           copiedFlash={copiedFlash}
+          onExportXLSX={handleExportXLSX}
+          onExportZIP={handleExportZIP}
           onExportJSON={handleExportJSON}
           onCopyText={copyText}
           onClose={() => setShowExport(false)}
