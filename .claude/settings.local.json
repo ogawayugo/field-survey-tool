@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(mkdir -p \"C:/Users/81804/OneDrive/デスクトップ/field-survey-tool/public/templates\")",
+      "Bash(cp \"C:/Users/81804/OneDrive/デスクトップ/field-survey-tool/template_shibuya.xlsx\" \"C:/Users/81804/OneDrive/デスクトップ/field-survey-tool/public/templates/shibuya.xlsx\")",
+      "Bash(npm run:*)",
+      "Bash(node -e ':*)",
+      "Bash(node _inspect_template.cjs)",
+      "Bash(curl:*)"
+    ]
+  }
+}

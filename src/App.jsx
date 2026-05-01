@@ -4,6 +4,7 @@ import { Leaf, Plus, Trash2, Camera, Download, ChevronLeft, ChevronRight, Save, 
 import { storage } from './lib/storage';
 import { compressImage } from './lib/imageCompress';
 import { formatTreeText, exportJSON, exportXLSX, exportZIP, loadAllTreesWithPhotos } from './lib/exportHelpers';
+import { generateKarteExcel } from './lib/karteGenerator.js';
 import { STORAGE, WINDOW_SIZE, SAVE_DEBOUNCE_MS, PLANTING_FORMS, STAKE_STATES } from './config/constants';
 
 import Section from './components/Section';
@@ -15,6 +16,8 @@ import PhotoViewer from './components/PhotoViewer';
 import ExportModal from './components/ExportModal';
 import SurveyMetaPanel from './components/SurveyMetaPanel';
 import JudgmentPanel from './components/JudgmentPanel';
+import DiagnosisChips from './components/DiagnosisChips.jsx';
+import { insertDiagnosisItem } from './lib/memoInsert.js';
 
 const emptyMeta = (id) => ({
   id,
@@ -144,6 +147,22 @@ export default function App() {
     if (meta.vitalityJudgment === undefined) meta.vitalityJudgment = '';
     if (!meta.partJudgments) meta.partJudgments = { 根元: '', 幹: '', 大枝: '' };
     if (meta.appearanceJudgment === undefined) meta.appearanceJudgment = '';
+    // v2.5: 分割メモを統合メモに移行
+    if (meta.memoNemoto || meta.memoMiki || meta.memoOoeda || meta.memoGeneral) {
+      if (!meta.memo) {
+        const parts = [];
+        if (meta.memoNemoto) parts.push('根元:' + meta.memoNemoto.replace(/\n/g, '、'));
+        if (meta.memoMiki) parts.push('幹:' + meta.memoMiki.replace(/\n/g, '、'));
+        if (meta.memoOoeda) parts.push('大枝:' + meta.memoOoeda.replace(/\n/g, '、'));
+        if (meta.memoGeneral) parts.push(meta.memoGeneral);
+        meta.memo = parts.join('\n');
+      }
+      delete meta.memoNemoto;
+      delete meta.memoMiki;
+      delete meta.memoOoeda;
+      delete meta.memoGeneral;
+    }
+    delete meta.diagnostics;
     return meta;
   };
 
@@ -397,11 +416,28 @@ export default function App() {
     }, SAVE_DEBOUNCE_MS);
   }, [currentId]);
 
+  const handleInsertDiagnosis = useCallback((part, item) => {
+    const newMemo = insertDiagnosisItem(currentMeta?.memo, part, item);
+    updateCurrent({ memo: newMemo });
+  }, [currentMeta?.memo, updateCurrent]);
+
   const manualSave = useCallback(() => {
     flushAllSaves();
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1200);
   }, [flushAllSaves]);
+
+  const handleExportKarte = useCallback(async () => {
+    flushAllSaves();
+    const fullTrees = await loadAllTreesWithPhotos(treeIdsRef.current, allMetaRef.current, loadedPhotosRef.current);
+    try {
+      await generateKarteExcel(fullTrees, surveyMeta, 'shibuya');
+      setShowExport(false);
+    } catch (e) {
+      alert('カルテ生成に失敗しました: ' + e.message);
+      console.error(e);
+    }
+  }, [flushAllSaves, surveyMeta]);
 
   const handleExportJSON = useCallback(async () => {
     flushAllSaves();
@@ -576,15 +612,17 @@ export default function App() {
         </Section>
 
         <Section title="現場メモ">
+          <DiagnosisChips onInsert={handleInsertDiagnosis} />
+
           <textarea
             value={currentMeta.memo}
             onChange={e => updateCurrent({ memo: e.target.value })}
             rows={8}
             className="w-full px-3 py-2 border border-stone-300 text-sm focus:outline-none focus:border-emerald-700 leading-relaxed"
-            placeholder={"例：\n根元に露出根被害5×20cm、踏圧強い\n幹は南方向に小さく傾斜\n枝は被圧を受けて葉が少なめ"}
+            placeholder={"例：\n根元:露出根被害5×20cm、踏圧\n幹:傾斜・小（南方向）\n大枝:被圧により葉が少なめ"}
           />
           <p className="text-[11px] text-stone-500 mt-2">
-            部位（根元・幹・枝）・寸法・方向・程度を含めると、後でカルテへ落とし込みやすくなります
+            部位（根元・幹・大枝）・寸法・方向・程度を含めると、後でカルテへ落とし込みやすくなります
           </p>
         </Section>
 
@@ -639,6 +677,7 @@ export default function App() {
           treeCount={treeIds.length}
           totalPhotos={totalPhotos}
           copiedFlash={copiedFlash}
+          onExportKarte={handleExportKarte}
           onExportXLSX={handleExportXLSX}
           onExportZIP={handleExportZIP}
           onExportJSON={handleExportJSON}
