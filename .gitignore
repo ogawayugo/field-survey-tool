@@ -22,3 +22,16 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Python build artifacts
+karte-generator/build/
+karte-generator/dist/
+karte-generator/__pycache__/
+karte-generator/*.pyc
+
+# Local data files (potentially containing personal info)
+karte-generator/downloads/
+karte-generator/files.zip
+karte-generator/karte_sample.xlsx
+
+# Claude Code local settings
+.claude/settings.local.json

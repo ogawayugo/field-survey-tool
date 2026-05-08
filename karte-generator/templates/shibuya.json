@@ -1,0 +1,130 @@
+{
+  "name": "街路樹診断カルテ（渋谷氷川の杜様式）",
+  "version": "1.0",
+  "template_file": "shibuya.xlsx",
+  "sheet_name": "街路樹診断カルテ様式",
+
+  "_comment_basic_info": "PWA入力 → カルテのセルへの直接転記",
+  "basic_info": {
+    "tree_number": "G4",
+    "species": "E5",
+    "height": "Y4",
+    "girth": "AF4",
+    "spread": "AN4",
+    "route": "G3",
+    "diagnostician": "X3",
+    "date": "AL3"
+  },
+
+  "_comment_cell_checkboxes": "セル内の □XXX を ■XXX に置換するチェックボックス",
+  "cell_checkboxes": {
+    "planting_form": {
+      "cell": "Q5",
+      "options": ["単独桝", "植栽帯", "緑地内", "その他"]
+    },
+    "stake": {
+      "cell": "AK5",
+      "options": ["良好", "なし", "破損"]
+    },
+    "vitality_sei": {
+      "cell": "AF7",
+      "options": ["１", "２", "３", "４", "５"],
+      "convert_input": "halfwidth_to_fullwidth"
+    },
+    "vitality_kei": {
+      "cell": "AF8",
+      "options": ["１", "２", "３", "４", "５"],
+      "convert_input": "halfwidth_to_fullwidth"
+    },
+    "vitality_judgment": {
+      "cell": "H11",
+      "options": ["健全か健全に近い", "注意すべき被害が見られる", "著しい被害が見られる", "不健全"],
+      "convert_input": "abc_to_label"
+    },
+    "appearance_judgment": {
+      "cell": "G46",
+      "options": ["Ａ", "Ｂ１", "Ｂ２", "Ｃ"],
+      "convert_input": "abc_to_fullwidth"
+    }
+  },
+
+  "_comment_part_judgments": "部位判定マトリクス（部位×ABCの2次元）",
+  "part_judgment_cells": {
+    "根元": {"A": "P40", "B1": "P41", "B2": "P42", "C": "P43"},
+    "幹":   {"A": "Z40", "B1": "Z41", "B2": "Z42", "C": "Z43"},
+    "大枝": {"A": "AJ40", "B1": "AJ41", "B2": "AJ42", "C": "AJ43"}
+  },
+
+  "_comment_diagnosis_rows": "部位診断のチェックボックス（行×部位列）",
+  "part_columns": {
+    "根元": "M",
+    "幹": "X",
+    "大枝": "AI"
+  },
+  "diagnosis_rows": {
+    "キノコ（子実体）": 18,
+    "木槌打診異常": 19,
+    "分岐部・付根の異常": 20,
+    "胴枯れなどの病害": 21,
+    "虫穴・虫フン・ヤニ": 22,
+    "根元の揺らぎ": {"row": 23, "only_part": "根元"},
+    "鋼棒貫入異常": {"row": 24, "only_part": "根元"},
+    "巻き根": {"row": 25, "only_part": "根元"},
+    "ルートカラー見えない": {"row": 26, "only_part": "根元", "checkbox_text": "見えない"},
+    "露出根被害": {"row": 27, "only_part": "根元"},
+    "不自然な傾斜": {"row": 28, "only_part": "根元"},
+    "枯枝": {"row": 16, "only_part": "大枝", "column_override": "AL"},
+    "スタブカット": {"row": 17, "only_part": "大枝", "column_override": "AL"}
+  },
+  "skip_diagnosis_items": [
+    "樹皮枯死・欠損・腐朽",
+    "開口空洞（芯に達しない）",
+    "開口空洞（芯に達する）"
+  ],
+
+  "_comment_shoken": "所見欄の書き込み先（最初のセル、結合セルになっている想定）",
+  "shoken": {
+    "first_cell": "G29",
+    "max_lines": 7
+  },
+
+  "_comment_others": "その他のセル",
+  "judgment_reason_cell": "F48",
+  "special_notes_cell": "AW56",
+
+  "_comment_photo_slots": "写真の配置（4枠）",
+  "photo_slots": {
+    "樹木全体": {
+      "anchor_cell": "BM13",
+      "offset_x": 0,
+      "offset_y": 0,
+      "width_pt": 348,
+      "height_pt": 358,
+      "keep_aspect_ratio": true
+    },
+    "クローズアップ1": {
+      "anchor_cell": "AW37",
+      "offset_x": 29,
+      "offset_y": 18.25,
+      "width_pt": 167,
+      "height_pt": 222.67,
+      "keep_aspect_ratio": false
+    },
+    "クローズアップ2": {
+      "anchor_cell": "BK37",
+      "offset_x": 29,
+      "offset_y": 18.25,
+      "width_pt": 167,
+      "height_pt": 222.67,
+      "keep_aspect_ratio": false
+    },
+    "クローズアップ3": {
+      "anchor_cell": "BY37",
+      "offset_x": 29,
+      "offset_y": 18.25,
+      "width_pt": 167,
+      "height_pt": 222.67,
+      "keep_aspect_ratio": false
+    }
+  }
+}

@@ -12,6 +12,11 @@ export default memo(function PhotoCard({ photo, onView, onChange, onRemove }) {
             {photo.caption}
           </div>
         )}
+        {photo.annotations && photo.annotations.length > 0 && (
+          <div className="absolute top-1 right-1 bg-red-600 text-white text-[9px] px-1.5 py-0.5 rounded-full font-medium">
+            {photo.annotations.length}マーク
+          </div>
+        )}
       </button>
       <div className="p-2 space-y-1.5">
         <input

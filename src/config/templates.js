@@ -43,8 +43,8 @@ export const TEMPLATES = {
     // format: 'ratio' = □なし □1/3未満 □1/3以上, 'arinashi' = □なし□あり（, 'mienai' = □見える□見えない（
     diagnosticCells: {
       樹皮枯死欠損腐朽:   { format: 'ratio',    search: '樹皮枯死', 根元: 'M13', 幹: 'X13', 大枝: 'AI13' },
-      開口空洞_芯なし:     { format: 'ratio',    search: '開口空洞（芯に達しない）', 根元: 'M14', 幹: 'X14', 大枝: 'AI14' },
-      開口空洞_芯あり:     { format: 'ratio',    search: '開口空洞（芯に達する）', 根元: 'M15', 幹: 'X15', 大枝: 'AI15' },
+      開口空洞_芯なし:     { format: 'ratio',    search: '開口空洞', 根元: 'M14', 幹: 'X14', 大枝: 'AI14' },
+      開口空洞_芯あり:     { format: 'ratio',    search: '開口空洞（芯達）', 根元: 'M15', 幹: 'X15', 大枝: 'AI15' },
       枯枝:               { format: 'arinashi', search: '枯枝', 大枝: 'AI16' },
       スタブカット:        { format: 'arinashi', search: 'スタブカット', 大枝: 'AI17' },
       キノコ:             { format: 'arinashi', search: 'キノコ', 根元: 'M18', 幹: 'X18', 大枝: 'AI18' },

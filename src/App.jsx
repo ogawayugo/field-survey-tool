@@ -17,6 +17,7 @@ import ExportModal from './components/ExportModal';
 import SurveyMetaPanel from './components/SurveyMetaPanel';
 import JudgmentPanel from './components/JudgmentPanel';
 import DiagnosisChips from './components/DiagnosisChips.jsx';
+import ThreeChoicePanel from './components/ThreeChoicePanel.jsx';
 import { insertDiagnosisItem } from './lib/memoInsert.js';
 
 const emptyMeta = (id) => ({
@@ -35,6 +36,14 @@ const emptyMeta = (id) => ({
   vitalityJudgment: '',
   partJudgments: { 根元: '', 幹: '', 大枝: '' },
   appearanceJudgment: '',
+  threeChoiceJudgments: {
+    root:   { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+    trunk:  { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+    branch: { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+  },
+  vitalityReason: '',
+  appearanceReason: '',
+  specialNotes: '',
   createdAt: new Date().toISOString(),
 });
 
@@ -147,6 +156,26 @@ export default function App() {
     if (meta.vitalityJudgment === undefined) meta.vitalityJudgment = '';
     if (!meta.partJudgments) meta.partJudgments = { 根元: '', 幹: '', 大枝: '' };
     if (meta.appearanceJudgment === undefined) meta.appearanceJudgment = '';
+    // 3択項目のデフォルト補完
+    if (!meta.threeChoiceJudgments) {
+      meta.threeChoiceJudgments = {
+        root:   { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+        trunk:  { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+        branch: { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' },
+      };
+    } else {
+      for (const partKey of ['root', 'trunk', 'branch']) {
+        if (!meta.threeChoiceJudgments[partKey]) {
+          meta.threeChoiceJudgments[partKey] = { barkDeath: 'none', cavityShallow: 'none', cavityDeep: 'none' };
+        } else {
+          for (const itemKey of ['barkDeath', 'cavityShallow', 'cavityDeep']) {
+            if (!meta.threeChoiceJudgments[partKey][itemKey]) {
+              meta.threeChoiceJudgments[partKey][itemKey] = 'none';
+            }
+          }
+        }
+      }
+    }
     // v2.5: 分割メモを統合メモに移行
     if (meta.memoNemoto || meta.memoMiki || meta.memoOoeda || meta.memoGeneral) {
       if (!meta.memo) {
@@ -162,6 +191,9 @@ export default function App() {
       delete meta.memoOoeda;
       delete meta.memoGeneral;
     }
+    if (meta.vitalityReason === undefined) meta.vitalityReason = '';
+    if (meta.appearanceReason === undefined) meta.appearanceReason = '';
+    if (meta.specialNotes === undefined) meta.specialNotes = '';
     delete meta.diagnostics;
     return meta;
   };
@@ -174,7 +206,11 @@ export default function App() {
     for (const pid of photoIds) {
       try {
         const r = await storage.get(STORAGE.treePhoto(id, pid));
-        if (r) photos.push(JSON.parse(r.value));
+        if (r) {
+          const photo = JSON.parse(r.value);
+          if (!photo.annotations) photo.annotations = [];
+          photos.push(photo);
+        }
       } catch {}
     }
     setLoadedPhotos(prev => ({ ...prev, [id]: photos }));
@@ -614,6 +650,10 @@ export default function App() {
         <Section title="現場メモ">
           <DiagnosisChips onInsert={handleInsertDiagnosis} />
 
+          <div className="mt-2 mb-3">
+            <ThreeChoicePanel meta={currentMeta} onChange={updateCurrent} />
+          </div>
+
           <textarea
             value={currentMeta.memo}
             onChange={e => updateCurrent({ memo: e.target.value })}
@@ -686,7 +726,15 @@ export default function App() {
         />
       )}
 
-      <PhotoViewer photo={viewingPhoto} onClose={() => setViewingPhoto(null)} />
+      <PhotoViewer
+        photo={viewingPhoto}
+        onClose={() => setViewingPhoto(null)}
+        onChangeAnnotations={(newAnnotations) => {
+          if (!viewingPhoto) return;
+          updatePhoto(viewingPhoto.id, { annotations: newAnnotations });
+          setViewingPhoto(prev => prev ? { ...prev, annotations: newAnnotations } : null);
+        }}
+      />
     </div>
   );
 }

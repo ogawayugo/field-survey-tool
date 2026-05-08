@@ -38,17 +38,20 @@ export const JUDGMENT_COLORS = {
 // 部位
 export const TREE_PARTS = ['根元', '幹', '大枝'];
 
-// 部位ごとの診断項目（メモ挿入チップ用）
-export const DIAGNOSIS_ITEMS = {
+// 診断項目（メモ挿入チップ用）- 共通と部位専用に分離
+export const DIAGNOSIS_COMMON_ITEMS = [
+  '樹皮枯死・欠損・腐朽',
+  '開口空洞',
+  '開口空洞（芯達）',
+  'キノコ（子実体）',
+  '木槌打診異常',
+  '分岐部・付根の異常',
+  '胴枯れなどの病害',
+  '虫穴・虫フン・ヤニ',
+];
+
+export const DIAGNOSIS_PART_ITEMS = {
   根元: [
-    '樹皮枯死・欠損・腐朽',
-    '開口空洞（芯に達しない）',
-    '開口空洞（芯に達する）',
-    'キノコ（子実体）',
-    '木槌打診異常',
-    '分岐部・付根の異常',
-    '胴枯れなどの病害',
-    '虫穴・虫フン・ヤニ',
     '根元の揺らぎ',
     '鋼棒貫入異常',
     '巻き根',
@@ -56,29 +59,39 @@ export const DIAGNOSIS_ITEMS = {
     '露出根被害',
     '不自然な傾斜',
   ],
-  幹: [
-    '樹皮枯死・欠損・腐朽',
-    '開口空洞（芯に達しない）',
-    '開口空洞（芯に達する）',
-    'キノコ（子実体）',
-    '木槌打診異常',
-    '分岐部・付根の異常',
-    '胴枯れなどの病害',
-    '虫穴・虫フン・ヤニ',
-  ],
   大枝: [
-    '樹皮枯死・欠損・腐朽',
-    '開口空洞（芯に達しない）',
-    '開口空洞（芯に達する）',
     '枯枝',
     'スタブカット',
-    'キノコ（子実体）',
-    '木槌打診異常',
-    '分岐部・付根の異常',
-    '胴枯れなどの病害',
-    '虫穴・虫フン・ヤニ',
   ],
 };
 
-// 部位の表示順（チップグループの並び順）
+// 後方互換: 既存コードが DIAGNOSIS_ITEMS を参照している場合のため
+export const DIAGNOSIS_ITEMS = {
+  根元: [...DIAGNOSIS_COMMON_ITEMS, ...DIAGNOSIS_PART_ITEMS['根元']],
+  幹: [...DIAGNOSIS_COMMON_ITEMS],
+  大枝: [...DIAGNOSIS_COMMON_ITEMS, ...DIAGNOSIS_PART_ITEMS['大枝']],
+};
+
+// 部位の表示順
 export const DIAGNOSIS_PARTS_ORDER = ['根元', '幹', '大枝'];
+
+// 3択項目（なし / 1/3未満 / 1/3以上）
+export const THREE_CHOICE_ITEMS = [
+  { key: 'barkDeath', label: '樹皮枯死・欠損・腐朽' },
+  { key: 'cavityShallow', label: '開口空洞' },
+  { key: 'cavityDeep', label: '開口空洞（芯達）' },
+];
+
+// 3択の選択肢
+export const THREE_CHOICE_OPTIONS = [
+  { value: 'none', label: 'なし' },
+  { value: 'less_third', label: '1/3未満' },
+  { value: 'more_third', label: '1/3以上' },
+];
+
+// 部位キー（既存と整合させる）
+export const THREE_CHOICE_PARTS = [
+  { key: 'root', label: '根元' },
+  { key: 'trunk', label: '幹' },
+  { key: 'branch', label: '大枝' },
+];

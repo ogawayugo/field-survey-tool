@@ -59,8 +59,8 @@ function escapeRegex(s) {
 // 標準的な診断項目名のリスト
 const KNOWN_ITEMS = [
   '樹皮枯死・欠損・腐朽',
-  '開口空洞（芯に達しない）',
-  '開口空洞（芯に達する）',
+  '開口空洞',
+  '開口空洞（芯達）',
   'キノコ（子実体）',
   '木槌打診異常',
   '分岐部・付根の異常',
@@ -110,7 +110,7 @@ function extractItemName(s) {
 // 部位×項目の該当セル番地を返す
 function findDiagnosisCell(part, item) {
   // 行13-15（3択: なし/1/3未満/1/3以上）は自動チェック対象外
-  const SKIP_ITEMS = ['樹皮枯死・欠損・腐朽', '開口空洞（芯に達しない）', '開口空洞（芯に達する）'];
+  const SKIP_ITEMS = ['樹皮枯死・欠損・腐朽', '開口空洞', '開口空洞（芯達）'];
   if (SKIP_ITEMS.includes(item)) return null;
 
   const partColumns = { 根元: 'M', 幹: 'X', 大枝: 'AI' };
@@ -404,57 +404,94 @@ export async function generateKarteExcel(trees, surveyMeta, templateId = 'shibuy
 }
 
 /**
- * 生成された xlsx (buffer) の各シートの <cols> セクションを、
- * テンプレートの <cols> セクションで置換する。
- * これにより列スタイル・min/max範囲がテンプレートと同じになる。
+ * 生成された xlsx の XML をテンプレートのもので置換する。
+ * 1) xl/styles.xml — スタイル定義を完全置換（フォント・罫線・配置・塗りつぶし）
+ * 2) xl/theme/theme1.xml — テーマフォント・テーマカラーを統一
+ * 3) 各シートの <cols> セクション — 列幅・列スタイルをテンプレート通りに
  */
 async function fixWorksheetCols(generatedBuffer, templateId) {
-  // テンプレートを fetch
-  const tplResponse = await fetch(TEMPLATES[templateId].file);
-  const tplArrayBuffer = await tplResponse.arrayBuffer();
+  console.log('[fixWorksheetCols] START');
+  try {
+    console.log('[fixWorksheetCols] Loading template:', TEMPLATES[templateId].file);
+    const tplResponse = await fetch(TEMPLATES[templateId].file);
+    console.log('[fixWorksheetCols] Template response status:', tplResponse.status);
 
-  // テンプレートを zip として開く
-  const tplZip = await JSZip.loadAsync(tplArrayBuffer);
+    const tplArrayBuffer = await tplResponse.arrayBuffer();
+    console.log('[fixWorksheetCols] Template buffer size:', tplArrayBuffer.byteLength);
 
-  // テンプレートの sheet1.xml を取得（テンプレートはシート1枚）
-  const tplSheetXml = await tplZip.file('xl/worksheets/sheet1.xml').async('string');
+    const tplZip = await JSZip.loadAsync(tplArrayBuffer);
+    const genZip = await JSZip.loadAsync(generatedBuffer);
+    console.log('[fixWorksheetCols] Both zips loaded');
 
-  // テンプレートの <cols>...</cols> セクションを抽出
-  const colsMatch = tplSheetXml.match(/<cols[\s\S]*?<\/cols>/);
-  if (!colsMatch) {
-    console.warn('Template <cols> section not found, skip fix');
-    return generatedBuffer;
-  }
-  const tplCols = colsMatch[0];
-
-  // 生成された xlsx を zip として開く
-  const genZip = await JSZip.loadAsync(generatedBuffer);
-
-  // 各シートの sheet*.xml を処理
-  const sheetFiles = Object.keys(genZip.files).filter(
-    name => name.match(/^xl\/worksheets\/sheet\d+\.xml$/)
-  );
-
-  for (const sheetFile of sheetFiles) {
-    let sheetXml = await genZip.file(sheetFile).async('string');
-
-    // 既存の <cols>...</cols> をテンプレートのもので置換
-    if (sheetXml.match(/<cols[\s\S]*?<\/cols>/)) {
-      sheetXml = sheetXml.replace(/<cols[\s\S]*?<\/cols>/, tplCols);
+    // 1) styles.xml の置換
+    const tplStylesFile = tplZip.file('xl/styles.xml');
+    if (!tplStylesFile) {
+      console.warn('[fixWorksheetCols] Template styles.xml NOT FOUND');
     } else {
-      // <cols> がない場合は <sheetData> の前に挿入
-      sheetXml = sheetXml.replace('<sheetData', tplCols + '<sheetData');
+      const tplStylesXml = await tplStylesFile.async('string');
+      console.log('[fixWorksheetCols] Template styles.xml size:', tplStylesXml.length);
+      genZip.file('xl/styles.xml', tplStylesXml);
+      console.log('[fixWorksheetCols] styles.xml REPLACED');
     }
 
-    genZip.file(sheetFile, sheetXml);
+    // 2) <cols> セクションの置換
+    const tplSheetFile = tplZip.file('xl/worksheets/sheet1.xml');
+    if (!tplSheetFile) {
+      console.warn('[fixWorksheetCols] Template sheet1.xml NOT FOUND');
+    } else {
+      const tplSheetXml = await tplSheetFile.async('string');
+      console.log('[fixWorksheetCols] Template sheet1.xml size:', tplSheetXml.length);
+      const colsMatch = tplSheetXml.match(/<cols[\s\S]*?<\/cols>/);
+      if (!colsMatch) {
+        console.warn('[fixWorksheetCols] Template <cols> section NOT FOUND');
+      } else {
+        const tplCols = colsMatch[0];
+        console.log('[fixWorksheetCols] Template <cols> size:', tplCols.length);
+
+        const sheetFiles = Object.keys(genZip.files).filter(
+          name => name.match(/^xl\/worksheets\/sheet\d+\.xml$/)
+        );
+        console.log('[fixWorksheetCols] Generated sheet files:', sheetFiles);
+
+        for (const sheetFile of sheetFiles) {
+          let sheetXml = await genZip.file(sheetFile).async('string');
+          const hadCols = !!sheetXml.match(/<cols[\s\S]*?<\/cols>/);
+
+          if (hadCols) {
+            sheetXml = sheetXml.replace(/<cols[\s\S]*?<\/cols>/, tplCols);
+          } else {
+            sheetXml = sheetXml.replace('<sheetData', tplCols + '<sheetData');
+          }
+
+          genZip.file(sheetFile, sheetXml);
+          console.log(`[fixWorksheetCols] ${sheetFile}: cols ${hadCols ? 'REPLACED' : 'INSERTED'}`);
+        }
+      }
+    }
+
+    // 3) theme1.xml の置換
+    const tplThemeFile = tplZip.file('xl/theme/theme1.xml');
+    if (!tplThemeFile) {
+      console.warn('[fixWorksheetCols] Template theme1.xml NOT FOUND');
+    } else {
+      const tplTheme = await tplThemeFile.async('string');
+      console.log('[fixWorksheetCols] Template theme1.xml size:', tplTheme.length);
+      genZip.file('xl/theme/theme1.xml', tplTheme);
+      console.log('[fixWorksheetCols] theme1.xml REPLACED');
+    }
+
+    // ZIP 書き出し
+    console.log('[fixWorksheetCols] Generating new zip...');
+    const fixedBuffer = await genZip.generateAsync({
+      type: 'arraybuffer',
+      compression: 'DEFLATE',
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    console.log('[fixWorksheetCols] New zip size:', fixedBuffer.byteLength);
+    console.log('[fixWorksheetCols] DONE');
+    return fixedBuffer;
+  } catch (e) {
+    console.error('[fixWorksheetCols] ERROR:', e);
+    throw e;
   }
-
-  // zip を buffer として書き出す
-  const fixedBuffer = await genZip.generateAsync({
-    type: 'arraybuffer',
-    compression: 'DEFLATE',
-    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
-
-  return fixedBuffer;
 }
