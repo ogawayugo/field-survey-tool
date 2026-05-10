@@ -384,7 +384,7 @@ def set_cell_checkbox(text: str, selected: str) -> str:
     escaped = re.escape(selected)
     pattern = re.compile(r'□(\s*)' + escaped)
     if pattern.search(result):
-        result = pattern.sub(r'■\1' + selected, result)
+        result = pattern.sub(lambda m: '■' + m.group(1) + selected, result)
     return result
 
 
@@ -519,6 +519,52 @@ def write_shoken(sheet: Worksheet, tree: dict, config: dict):
             indent=cell.alignment.indent,
         )
         cell.alignment = new_alignment
+
+
+def write_three_choice_circumference(sheet: Worksheet, tree: dict, config: dict):
+    """3択項目（周囲長比率）の書き込み（v3.3）
+
+    PWAの threeChoiceJudgments データに基づいて、該当セルの選択肢に■を付ける。
+    """
+    three_choice_config = config.get('three_choice_circumference')
+    if not three_choice_config:
+        return
+
+    three_choice_data = tree.get('threeChoiceJudgments', {})
+
+    # 内部キー → Excelラベルの対応
+    KEY_TO_LABEL = {
+        'none': 'なし',
+        'less_third': '1/3未満',
+        'more_third': '1/3以上',
+    }
+
+    for item_key in ['barkDeath', 'cavityShallow', 'cavityDeep']:
+        if item_key not in three_choice_config:
+            continue
+
+        for part_key in ['root', 'trunk', 'branch']:
+            cell_addr = three_choice_config[item_key].get(part_key)
+            if not cell_addr:
+                continue
+
+            # データ取得（未入力なら 'none' をデフォルト）
+            selected = three_choice_data.get(part_key, {}).get(item_key)
+            if not selected:
+                selected = 'none'
+
+            # 有効なキーでなければ 'none' にフォールバック
+            if selected not in KEY_TO_LABEL:
+                selected = 'none'
+
+            original = sheet[cell_addr].value
+            if original is None:
+                continue
+
+            # セルテキスト内の選択された値だけ■、他は□
+            new_text = set_cell_checkbox(str(original), KEY_TO_LABEL[selected])
+            if new_text != str(original):
+                sheet[cell_addr] = new_text
 
 
 def write_overall_judgment(sheet: Worksheet, tree: dict, config: dict):
@@ -702,6 +748,7 @@ def generate_karte(json_path: Path, output_path: Path, template_id: str):
             write_cell_checkboxes(new_sheet, tree, config)
             write_part_judgments(new_sheet, tree, config)
             write_diagnosis_checkboxes(new_sheet, tree, config)
+            write_three_choice_circumference(new_sheet, tree, config)
             write_shoken(new_sheet, tree, config)
             write_overall_judgment(new_sheet, tree, config)
 

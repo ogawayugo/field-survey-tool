@@ -44,7 +44,9 @@ try:
         write_cell_checkboxes,
         write_part_judgments,
         write_diagnosis_checkboxes,
+        write_three_choice_circumference,
         write_shoken,
+        write_overall_judgment,
         embed_photos,
     )
     from openpyxl import load_workbook
@@ -157,7 +159,9 @@ def generate_karte_from_multiple_jsons(json_paths, output_path, template_id, pro
             write_cell_checkboxes(new_sheet, tree, config)
             write_part_judgments(new_sheet, tree, config)
             write_diagnosis_checkboxes(new_sheet, tree, config)
+            write_three_choice_circumference(new_sheet, tree, config)
             write_shoken(new_sheet, tree, config)
+            write_overall_judgment(new_sheet, tree, config)
 
             photos = tree.get('photos', [])
             if photos:

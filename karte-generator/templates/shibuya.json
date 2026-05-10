@@ -82,6 +82,25 @@
     "開口空洞（芯に達する）"
   ],
 
+  "_comment_three_choice": "3択項目（周囲長比率）のセルマッピング（v3.3）",
+  "three_choice_circumference": {
+    "barkDeath": {
+      "root": "M13",
+      "trunk": "X13",
+      "branch": "AI13"
+    },
+    "cavityShallow": {
+      "root": "M14",
+      "trunk": "X14",
+      "branch": "AI14"
+    },
+    "cavityDeep": {
+      "root": "M15",
+      "trunk": "X15",
+      "branch": "AI15"
+    }
+  },
+
   "_comment_shoken": "所見欄の書き込み先（最初のセル、結合セルになっている想定）",
   "shoken": {
     "first_cell": "G29",
