@@ -14,7 +14,7 @@ import TreePill from './components/TreePill';
 import PhotoCard from './components/PhotoCard';
 import PhotoViewer from './components/PhotoViewer';
 import ExportModal from './components/ExportModal';
-import SurveyMetaPanel from './components/SurveyMetaPanel';
+import SettingsModal from './components/SettingsModal';
 import JudgmentPanel from './components/JudgmentPanel';
 import DiagnosisChips from './components/DiagnosisChips.jsx';
 import ThreeChoicePanel from './components/ThreeChoicePanel.jsx';
@@ -43,6 +43,8 @@ const emptyMeta = (id) => ({
   },
   vitalityReason: '',
   appearanceReason: '',
+  overallJudgment: '',
+  overallReason: '',
   specialNotes: '',
   createdAt: new Date().toISOString(),
 });
@@ -63,7 +65,7 @@ export default function App() {
   const [surveyMeta, setSurveyMeta] = useState({ route: '', office: '', date: '', diagnostician: '' });
 
   const [loading, setLoading] = useState(true);
-  const [showMeta, setShowMeta] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [copiedFlash, setCopiedFlash] = useState(null);
   const [showExport, setShowExport] = useState(false);
@@ -193,6 +195,8 @@ export default function App() {
     }
     if (meta.vitalityReason === undefined) meta.vitalityReason = '';
     if (meta.appearanceReason === undefined) meta.appearanceReason = '';
+    if (meta.overallJudgment === undefined) meta.overallJudgment = '';
+    if (meta.overallReason === undefined) meta.overallReason = '';
     if (meta.specialNotes === undefined) meta.specialNotes = '';
     delete meta.diagnostics;
     return meta;
@@ -552,7 +556,7 @@ export default function App() {
             <h1 className="serif text-base sm:text-lg font-medium text-stone-900 leading-tight">街路樹現場調査</h1>
             <p className="text-[10px] text-stone-500 tracking-wider uppercase">Field Survey · {treeIds.length}本 / 写真{totalPhotos}枚</p>
           </div>
-          <button onClick={() => setShowMeta(!showMeta)} className="p-2 hover:bg-stone-200/60 transition-colors" title="調査全体の情報">
+          <button onClick={() => setIsSettingsOpen(true)} className="p-2 hover:bg-stone-200/60 transition-colors" title="調査全体の情報">
             <Settings className="w-4 h-4 text-stone-700" strokeWidth={1.5} />
           </button>
           <button onClick={() => setShowExport(true)} className="px-3 py-2 bg-emerald-900 hover:bg-emerald-800 text-white text-xs flex items-center gap-1.5">
@@ -560,8 +564,6 @@ export default function App() {
             エクスポート
           </button>
         </div>
-
-        {showMeta && <SurveyMetaPanel surveyMeta={surveyMeta} onUpdate={saveSurveyMeta} />}
 
         <div className="max-w-4xl mx-auto px-4 py-2 flex items-center gap-2">
           <button onClick={() => currentIdx > 0 && switchTree(currentIdx - 1)} disabled={currentIdx === 0} className="p-1.5 disabled:opacity-30 hover:bg-stone-200/60">
@@ -725,6 +727,13 @@ export default function App() {
           onClose={() => setShowExport(false)}
         />
       )}
+
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        surveyMeta={surveyMeta}
+        onSave={(values) => saveSurveyMeta(values)}
+        onClose={() => setIsSettingsOpen(false)}
+      />
 
       <PhotoViewer
         photo={viewingPhoto}

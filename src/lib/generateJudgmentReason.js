@@ -180,6 +180,16 @@ function buildPartSentence(partKey, items) {
 }
 
 /**
+ * 活力判定（A/B1/B2/C）の長文ラベル
+ */
+const VITALITY_JUDGMENT_LABEL = {
+  A: '健全か健全に近い',
+  B1: '注意すべき被害が見られる',
+  B2: '著しい被害が見られる',
+  C: '不健全',
+};
+
+/**
  * 外観診断判定（A/B1/B2/C）の評価語
  */
 const APPEARANCE_LABEL = {
@@ -221,6 +231,106 @@ export function generateAppearanceReason(tree) {
       sentences.push(`以上のことから、外観診断判定は${judgment}（${label}）と判断した。`);
     } else {
       sentences.push(`外観診断判定は${judgment}（${label}）と判断した。`);
+    }
+  }
+
+  return sentences.join('');
+}
+
+
+// ==================== 総合判定（v3.2） ====================
+
+/**
+ * 樹勢・樹形から活力概況テキストを生成
+ */
+function buildVigorContext(sei, kei) {
+  const parts = [];
+  if (sei != null && sei !== '') parts.push(`樹勢${sei}`);
+  if (kei != null && kei !== '') parts.push(`樹形${kei}`);
+  if (parts.length === 0) return '';
+
+  const numText = parts.join('、');
+  const values = [sei, kei].filter(v => v != null && v !== '').map(Number);
+  if (values.length === 0) return numText;
+  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+
+  if (avg >= 3) {
+    return `${numText}と活力低下が見られ`;
+  } else if (avg >= 2) {
+    return `${numText}とやや活力の低下が見られ`;
+  } else {
+    return `${numText}と活力は良好で`;
+  }
+}
+
+/**
+ * メモから外観所見の要約を生成（部位別）
+ */
+function buildAppearanceObservations(memo) {
+  if (!memo) return '';
+
+  const PART_LABELS = ['根元', '幹', '大枝'];
+  const partItems = { 根元: [], 幹: [], 大枝: [] };
+
+  const lines = memo.split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(/^(根元|幹|大枝)[:：](.+)$/);
+    if (!m) continue;
+    const part = m[1];
+    const rawItems = m[2].split(/[、,]/).map(s => s.trim()).filter(Boolean);
+    const transformed = rawItems.map(transformItem).filter(Boolean);
+    partItems[part].push(...transformed);
+  }
+
+  const fragments = [];
+  for (const part of PART_LABELS) {
+    const items = [...new Set(partItems[part])];
+    if (items.length === 0) continue;
+    const joined = joinPhrases(items);
+    const partLabel = part === '大枝' ? '大枝' : `${part}部`;
+    fragments.push(`${partLabel}に${joined}`);
+  }
+
+  if (fragments.length === 0) return '';
+  return fragments.join('、') + 'を認め';
+}
+
+/**
+ * 総合判定理由を生成（パターンB：根拠込み詳細型）
+ *
+ * 構成：
+ *   1. 活力面：「樹勢X、樹形Yと活力低下が見られ、活力判定はB1（〜）。」
+ *   2. 外観面：「外観面では〜を認め、外観診断判定はB2（〜）。」
+ *   3. 総合  ：「これらを踏まえ、総合判定はB2（〜）と判断した。」
+ */
+export function generateOverallReason(tree) {
+  const sentences = [];
+
+  // 活力面
+  const vigorCtx = buildVigorContext(tree.vitalitySei, tree.vitalityKei);
+  const vj = tree.vitalityJudgment;
+  if (vigorCtx && vj && VITALITY_JUDGMENT_LABEL[vj]) {
+    sentences.push(`${vigorCtx}、活力判定は${vj}(${VITALITY_JUDGMENT_LABEL[vj]})。`);
+  } else if (vj && VITALITY_JUDGMENT_LABEL[vj]) {
+    sentences.push(`活力判定は${vj}(${VITALITY_JUDGMENT_LABEL[vj]})。`);
+  }
+
+  // 外観面
+  const obsText = buildAppearanceObservations(tree.memo || '');
+  const aj = tree.appearanceJudgment;
+  if (obsText && aj && APPEARANCE_LABEL[aj]) {
+    sentences.push(`外観面では${obsText}、外観診断判定は${aj}(${APPEARANCE_LABEL[aj]})。`);
+  } else if (aj && APPEARANCE_LABEL[aj]) {
+    sentences.push(`外観診断判定は${aj}(${APPEARANCE_LABEL[aj]})。`);
+  }
+
+  // 総合判定
+  const oj = tree.overallJudgment;
+  if (oj && VITALITY_JUDGMENT_LABEL[oj]) {
+    if (sentences.length > 0) {
+      sentences.push(`これらを踏まえ、総合判定は${oj}(${VITALITY_JUDGMENT_LABEL[oj]})と判断した。`);
+    } else {
+      sentences.push(`総合判定は${oj}(${VITALITY_JUDGMENT_LABEL[oj]})と判断した。`);
     }
   }
 

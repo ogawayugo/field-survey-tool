@@ -88,6 +88,14 @@
     "max_lines": 7
   },
 
+  "_comment_overall": "総合判定（v3.2）",
+  "overall_judgment": {
+    "cell": "G60",
+    "options": ["Ａ", "Ｂ１", "Ｂ２", "Ｃ"],
+    "convert_input": "abc_to_fullwidth"
+  },
+  "overall_reason_cell": "F62",
+
   "_comment_others": "その他のセル",
   "judgment_reason_cell": "F48",
   "special_notes_cell": "AW56",

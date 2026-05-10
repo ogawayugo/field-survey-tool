@@ -370,63 +370,115 @@ def write_part_judgments(sheet: Worksheet, tree: dict, config: dict):
         sheet[cell_addr] = new_text
 
 
-def write_diagnosis_checkboxes(sheet: Worksheet, tree: dict, config: dict):
-    """部位診断のチェックボックス（メモから「部位×項目」を抽出して該当セルを ■）"""
-    memo = tree.get('memo', '')
-    if not memo:
-        return
+def set_cell_checkbox(text: str, selected: str) -> str:
+    """
+    セル内の全チェックボックスを□にリセットし、指定された選択肢だけ■にする。
+    例: "□なし□あり（" + selected="なし" → "■なし□あり（"
+    例: "□なし□あり（" + selected="あり" → "□なし■あり（"
+    """
+    if not text:
+        return text
+    # 全て□にリセット
+    result = text.replace('■', '□')
+    # 指定された選択肢を■に
+    escaped = re.escape(selected)
+    pattern = re.compile(r'□(\s*)' + escaped)
+    if pattern.search(result):
+        result = pattern.sub(r'■\1' + selected, result)
+    return result
 
-    parts_items = parse_memo_to_parts(memo)
+
+def get_negative_checkbox_text(checkbox_text: str) -> str:
+    """正のチェックボックステキストから対応する否定テキストを返す"""
+    if checkbox_text == '見えない':
+        return '見える'
+    return 'なし'
+
+
+def write_diagnosis_checkboxes(sheet: Worksheet, tree: dict, config: dict):
+    """部位診断のチェックボックス
+
+    - デフォルトで全項目の「なし」に■をつける
+    - 所見（メモ）に該当する病害チップがある場合、その部位×項目の「あり」に■をつけ「なし」を□にする
+    """
+    memo = tree.get('memo', '')
+    parts_items = parse_memo_to_parts(memo) if memo else {'根元': [], '幹': [], '大枝': [], '_free': []}
+
     diagnosis_rows = config['diagnosis_rows']
     part_columns = config['part_columns']
     skip_items = set(config.get('skip_diagnosis_items', []))
 
+    # メモから見つかった (部位, 正規化項目名) のセットを構築
+    found_set = set()
     for part, items in parts_items.items():
         if part == '_free':
             continue
-        if part not in part_columns:
-            continue
-        col = part_columns[part]
-
         for item_text in items:
-            # 寸法を含む可能性があるので項目名部分だけ抽出
             item_name = extract_diagnosis_item_name(item_text)
             if not item_name:
                 continue
-            # スキップ対象（3択項目）
-            if item_name in skip_items:
-                continue
-            # 全角・半角を吸収して標準名にマップ
-            normalized_name = item_name.replace('(', '（').replace(')', '）')
-            if normalized_name not in diagnosis_rows:
-                # 開口空洞のような揺れも吸収できなかった
-                continue
+            normalized = item_name.replace('(', '（').replace(')', '）')
+            if normalized in diagnosis_rows:
+                row_def = diagnosis_rows[normalized]
+                if isinstance(row_def, dict):
+                    only_part = row_def.get('only_part')
+                    # only_part指定がある場合はその部位に強制マッピング
+                    if only_part:
+                        found_set.add((only_part, normalized))
+                    else:
+                        found_set.add((part, normalized))
+                else:
+                    found_set.add((part, normalized))
 
-            row_def = diagnosis_rows[normalized_name]
-            if isinstance(row_def, dict):
-                row = row_def['row']
-                only_part = row_def.get('only_part')
-                if only_part and part != only_part:
-                    # 「不自然な傾斜」「枯枝」など、特定の部位にしか該当しない項目は、
-                    # ユーザーが別部位で書いてもその部位の正式列に書き込む（救済）
-                    pass  # 続行
-                col_to_use = row_def.get('column_override', col)
-                # only_partがある場合は、該当部位の列を強制使用
-                if only_part:
-                    col_to_use = row_def.get('column_override', config['part_columns'][only_part])
-                checkbox_text = row_def.get('checkbox_text', 'あり')
+    # 全診断行×部位を処理
+    for item_name, row_def in diagnosis_rows.items():
+        if item_name in skip_items:
+            continue
+
+        if isinstance(row_def, dict):
+            row = row_def['row']
+            only_part = row_def.get('only_part')
+            checkbox_text = row_def.get('checkbox_text', 'あり')
+            col_override = row_def.get('column_override')
+        else:
+            row = row_def
+            only_part = None
+            checkbox_text = 'あり'
+            col_override = None
+
+        negative_text = get_negative_checkbox_text(checkbox_text)
+
+        # この項目が適用される部位リスト
+        if only_part:
+            parts_to_process = [only_part]
+        else:
+            parts_to_process = list(part_columns.keys())
+
+        for part in parts_to_process:
+            if only_part:
+                col = col_override or part_columns.get(only_part, '')
             else:
-                row = row_def
-                col_to_use = col
-                checkbox_text = 'あり'
+                col = part_columns.get(part, '')
 
-            cell_addr = f"{col_to_use}{row}"
+            if not col:
+                continue
+
+            cell_addr = f"{col}{row}"
             original = sheet[cell_addr].value
             if original is None:
                 continue
 
-            new_text = update_cell_checkbox(str(original), [checkbox_text, 'なし', '見える', '見えない', '1/3未満', '1/3以上'], checkbox_text)
-            if new_text != original:
+            text = str(original)
+            is_found = (part, item_name) in found_set
+
+            if is_found:
+                # 該当する病害が所見にある → あり（正）に■、なし（否）を□
+                new_text = set_cell_checkbox(text, checkbox_text)
+            else:
+                # 該当する病害が所見にない → なし（否）に■、あり（正）を□
+                new_text = set_cell_checkbox(text, negative_text)
+
+            if new_text != str(original):
                 sheet[cell_addr] = new_text
 
 
@@ -467,6 +519,41 @@ def write_shoken(sheet: Worksheet, tree: dict, config: dict):
             indent=cell.alignment.indent,
         )
         cell.alignment = new_alignment
+
+
+def write_overall_judgment(sheet: Worksheet, tree: dict, config: dict):
+    """総合判定の書き込み（v3.2）"""
+    # チェックボックス（G60: □Ａ：... □Ｂ１：... □Ｂ２：... □Ｃ：...）
+    oj_config = config.get('overall_judgment')
+    if oj_config:
+        overall = tree.get('overallJudgment', '')
+        if overall:
+            value = ABC_TO_FULLWIDTH.get(overall, '')
+        else:
+            value = ''
+        cell_addr = oj_config['cell']
+        original = sheet[cell_addr].value
+        if original is not None:
+            new_text = update_cell_checkbox(str(original), oj_config['options'], value)
+            if new_text != str(original):
+                sheet[cell_addr] = new_text
+
+    # 判定理由テキスト
+    reason_cell = config.get('overall_reason_cell')
+    if reason_cell:
+        reason = tree.get('overallReason', '')
+        if reason:
+            sheet[reason_cell] = reason
+            # wrap_text 有効化
+            from openpyxl.styles import Alignment
+            cell = sheet[reason_cell]
+            if cell.alignment:
+                cell.alignment = Alignment(
+                    horizontal=cell.alignment.horizontal,
+                    vertical=cell.alignment.vertical or 'top',
+                    wrap_text=True,
+                    indent=cell.alignment.indent,
+                )
 
 
 # ===================================================================
@@ -616,6 +703,7 @@ def generate_karte(json_path: Path, output_path: Path, template_id: str):
             write_part_judgments(new_sheet, tree, config)
             write_diagnosis_checkboxes(new_sheet, tree, config)
             write_shoken(new_sheet, tree, config)
+            write_overall_judgment(new_sheet, tree, config)
 
             # 写真埋め込み
             photos = tree.get('photos', [])
