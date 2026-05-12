@@ -13,3 +13,11 @@ body {
 .serif { font-family: 'Noto Serif JP', serif; }
 .ink-line { background: linear-gradient(90deg, transparent, #6b5a3e 20%, #6b5a3e 80%, transparent); height: 1px; }
 input, select, textarea { font-family: inherit; background: #ffffff; }
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slide-up 0.25s ease-out;
+}

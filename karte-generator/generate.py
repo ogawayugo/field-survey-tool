@@ -32,7 +32,7 @@ try:
     from openpyxl.utils import get_column_letter, column_index_from_string
     from openpyxl.worksheet.worksheet import Worksheet
     from PIL import Image
-    from photo_annotator import annotate_photo
+    from photo_annotator import annotate_photo, annotate_photo_with_markers
 except ImportError:
     print("ERROR: 必要なライブラリがインストールされていません。", file=sys.stderr)
     print("以下を実行してください: pip install openpyxl pillow", file=sys.stderr)
@@ -631,15 +631,31 @@ def cell_pixel_position(sheet: Worksheet, cell_addr: str) -> tuple:
     return x, y
 
 
-def embed_photos(sheet: Worksheet, photos: list, config: dict):
+def embed_photos(sheet: Worksheet, photos: list, config: dict, tree_data: dict = None):
     """写真をスロットに従って埋め込む"""
     if not photos:
         return
 
     slots = config['photo_slots']
 
+    # 写真ファーストフロー: roleからlabelへのマッピング
+    ROLE_TO_LABEL = {
+        'main': '樹木全体',
+        'closeup1': 'クローズアップ1',
+        'closeup2': 'クローズアップ2',
+        'closeup3': 'クローズアップ3',
+    }
+
+    # マーカーデータ（tree_dataから取得）
+    markers = (tree_data or {}).get('markers', [])
+
     for photo in photos:
-        label = photo.get('label')
+        # roleベースまたはlabelベースでスロット決定
+        role = photo.get('role', '')
+        label = photo.get('label', '')
+        # roleがある場合はroleからlabelに変換
+        if role and role in ROLE_TO_LABEL:
+            label = ROLE_TO_LABEL[role]
         if not label or label not in slots:
             continue
 
@@ -651,11 +667,20 @@ def embed_photos(sheet: Worksheet, photos: list, config: dict):
         try:
             img_bytes = base64.b64decode(m.group(1))
 
-            # 全景写真(樹木全体)のアノテーション焼き込み
-            annotations = photo.get('annotations', [])
-            if label == '樹木全体' and annotations:
-                annotated_buf = annotate_photo(io.BytesIO(img_bytes), annotations, output_format="PNG")
+            # 写真ファーストフロー: メイン写真にマーカー焼き込み（黒+白フチ）
+            if role == 'main' and markers:
+                annotated_buf = annotate_photo_with_markers(
+                    io.BytesIO(img_bytes), markers, output_format="PNG"
+                )
                 pil_img = Image.open(annotated_buf)
+            # 旧形式: 全景写真のアノテーション焼き込み
+            elif label == '樹木全体':
+                annotations = photo.get('annotations', [])
+                if annotations:
+                    annotated_buf = annotate_photo(io.BytesIO(img_bytes), annotations, output_format="PNG")
+                    pil_img = Image.open(annotated_buf)
+                else:
+                    pil_img = Image.open(io.BytesIO(img_bytes))
             else:
                 pil_img = Image.open(io.BytesIO(img_bytes))
 
@@ -755,7 +780,7 @@ def generate_karte(json_path: Path, output_path: Path, template_id: str):
             # 写真埋め込み
             photos = tree.get('photos', [])
             if photos:
-                embed_photos(new_sheet, photos, config)
+                embed_photos(new_sheet, photos, config, tree_data=tree)
         except Exception as e:
             err(f"樹木 #{tree_no} の処理中にエラー: {e}")
             import traceback

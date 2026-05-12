@@ -13,12 +13,13 @@ import SegmentedControl from './components/SegmentedControl';
 import TreePill from './components/TreePill';
 import PhotoCard from './components/PhotoCard';
 import PhotoViewer from './components/PhotoViewer';
+import PhotoFrameGrid from './components/PhotoFrameGrid';
+import MarkerOverlay from './components/MarkerOverlay';
 import ExportModal from './components/ExportModal';
 import SettingsModal from './components/SettingsModal';
 import JudgmentPanel from './components/JudgmentPanel';
-import DiagnosisChips from './components/DiagnosisChips.jsx';
 import ThreeChoicePanel from './components/ThreeChoicePanel.jsx';
-import { insertDiagnosisItem } from './lib/memoInsert.js';
+import { generateMemoFromMarkers } from './lib/generateJudgmentReason.js';
 
 const emptyMeta = (id) => ({
   id,
@@ -33,6 +34,7 @@ const emptyMeta = (id) => ({
   vitalityKei: '',
   memo: '',
   photoIds: [],
+  markers: [],
   vitalityJudgment: '',
   partJudgments: { 根元: '', 幹: '', 大枝: '' },
   appearanceJudgment: '',
@@ -70,6 +72,7 @@ export default function App() {
   const [copiedFlash, setCopiedFlash] = useState(null);
   const [showExport, setShowExport] = useState(false);
   const [viewingPhoto, setViewingPhoto] = useState(null);
+  const [selectedMarkerId, setSelectedMarkerId] = useState(null);
 
   const allMetaRef = useRef(allMeta);
   const loadedPhotosRef = useRef(loadedPhotos);
@@ -198,8 +201,33 @@ export default function App() {
     if (meta.overallJudgment === undefined) meta.overallJudgment = '';
     if (meta.overallReason === undefined) meta.overallReason = '';
     if (meta.specialNotes === undefined) meta.specialNotes = '';
+    // 写真ファーストフロー: markersフィールド補完
+    if (!meta.markers) {
+      meta.markers = [];
+      // 旧形式メモが存在する場合は _legacyMemo を保持（変換促進バナー用）
+      if (meta.memo && meta.memo.trim()) {
+        meta._legacyMemo = meta.memo;
+      }
+    } else {
+      // 既存マーカーに collapsed / labelX / labelY / type がなければ追加
+      meta.markers = meta.markers.map(m => ({
+        ...m,
+        type: m.type ?? 'point',
+        collapsed: m.collapsed ?? false,
+        labelX: m.labelX ?? m.x,
+        labelY: m.labelY ?? Math.max(0.02, m.y - 0.12),
+      }));
+    }
     delete meta.diagnostics;
     return meta;
+  };
+
+  const inferRoleFromIndex = (index) => {
+    if (index === 0) return 'main';
+    if (index === 1) return 'closeup1';
+    if (index === 2) return 'closeup2';
+    if (index === 3) return 'closeup3';
+    return 'spare';
   };
 
   const loadPhotosForTree = async (id) => {
@@ -207,12 +235,17 @@ export default function App() {
     if (!meta) return;
     const photoIds = meta.photoIds || [];
     const photos = [];
-    for (const pid of photoIds) {
+    for (let i = 0; i < photoIds.length; i++) {
+      const pid = photoIds[i];
       try {
         const r = await storage.get(STORAGE.treePhoto(id, pid));
         if (r) {
           const photo = JSON.parse(r.value);
           if (!photo.annotations) photo.annotations = [];
+          // 写真ファーストフロー: roleがなければインデックスから推定
+          if (!photo.role) {
+            photo.role = inferRoleFromIndex(i);
+          }
           photos.push(photo);
         }
       } catch {}
@@ -378,7 +411,14 @@ export default function App() {
       try {
         const dataUrl = await compressImage(file);
         const pid = 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
-        const photo = { id: pid, dataUrl, label: '', caption: '', name: file.name };
+        // 写真ファーストフロー: 次の空き role を自動割当
+        const existingPhotos = loadedPhotosRef.current[id] || [];
+        const usedRoles = new Set(existingPhotos.map(p => p.role));
+        let role = 'spare';
+        for (const r of ['main', 'closeup1', 'closeup2', 'closeup3']) {
+          if (!usedRoles.has(r)) { role = r; break; }
+        }
+        const photo = { id: pid, dataUrl, label: '', caption: '', name: file.name, role };
 
         runIdle(async () => {
           try {
@@ -456,10 +496,124 @@ export default function App() {
     }, SAVE_DEBOUNCE_MS);
   }, [currentId]);
 
-  const handleInsertDiagnosis = useCallback((part, item) => {
-    const newMemo = insertDiagnosisItem(currentMeta?.memo, part, item);
-    updateCurrent({ memo: newMemo });
-  }, [currentMeta?.memo, updateCurrent]);
+  // 写真ファーストフロー: 特定roleに写真を割り当てる
+  const pendingRoleRef = useRef('spare');
+  const cameraRoleInputRef = useRef(null);
+  const fileRoleInputRef = useRef(null);
+
+  const handleTakePhotoForRole = useCallback((role) => {
+    pendingRoleRef.current = role;
+    cameraRoleInputRef.current?.click();
+  }, []);
+
+  const handlePickPhotoForRole = useCallback((role) => {
+    pendingRoleRef.current = role;
+    fileRoleInputRef.current?.click();
+  }, []);
+
+  const addPhotosWithRole = useCallback(async (e) => {
+    const files = e.target.files;
+    if (!files || !currentId) return;
+    const id = currentId;
+    const role = pendingRoleRef.current;
+
+    for (const file of Array.from(files)) {
+      try {
+        const dataUrl = await compressImage(file);
+        const pid = 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
+        const photo = { id: pid, dataUrl, label: '', caption: '', name: file.name, role };
+
+        runIdle(async () => {
+          try {
+            await storage.set(STORAGE.treePhoto(id, pid), JSON.stringify(photo));
+          } catch (err) { console.error('save photo error', err); }
+        });
+
+        setLoadedPhotos(prev => {
+          const next = { ...prev, [id]: [...(prev[id] || []), photo] };
+          loadedPhotosRef.current = next;
+          return next;
+        });
+        setAllMeta(prev => {
+          const meta = prev[id];
+          if (!meta) return prev;
+          const next = { ...prev, [id]: { ...meta, photoIds: [...(meta.photoIds || []), pid] } };
+          allMetaRef.current = next;
+          return next;
+        });
+        scheduleSaveMeta(id);
+      } catch (err) {
+        alert('画像処理失敗: ' + err.message);
+      }
+    }
+    e.target.value = '';
+    pendingRoleRef.current = 'spare';
+  }, [currentId, scheduleSaveMeta]);
+
+  // 写真のroleスワップ
+  const handleSwapRole = useCallback((sourcePhotoId, targetRole) => {
+    if (!currentId) return;
+    const id = currentId;
+    const photos = loadedPhotosRef.current[id] || [];
+
+    const sourcePhoto = photos.find(p => p.id === sourcePhotoId);
+    if (!sourcePhoto) return;
+
+    const targetPhoto = photos.find(p => p.role === targetRole);
+    const sourceRole = sourcePhoto.role;
+
+    const updated = photos.map(p => {
+      if (p.id === sourcePhotoId) return { ...p, role: targetRole };
+      if (targetPhoto && p.id === targetPhoto.id) return { ...p, role: sourceRole };
+      return p;
+    });
+
+    setLoadedPhotos(prev => {
+      const next = { ...prev, [id]: updated };
+      loadedPhotosRef.current = next;
+      return next;
+    });
+
+    // 両方のphotoをsave
+    const toSave = [sourcePhotoId];
+    if (targetPhoto) toSave.push(targetPhoto.id);
+    for (const pid of toSave) {
+      const ph = updated.find(p => p.id === pid);
+      if (ph) {
+        const tk = `photo:${id}:${pid}`;
+        if (saveTimers.current[tk]) clearTimeout(saveTimers.current[tk]);
+        saveTimers.current[tk] = setTimeout(() => {
+          delete saveTimers.current[tk];
+          runIdle(async () => {
+            try {
+              await storage.set(STORAGE.treePhoto(id, pid), JSON.stringify(ph));
+            } catch (err) { console.error(err); }
+          });
+        }, SAVE_DEBOUNCE_MS);
+      }
+    }
+  }, [currentId]);
+
+  // マーカー操作ハンドラー
+  const handleAddMarker = useCallback((marker) => {
+    const markers = [...(currentMeta?.markers || []), marker];
+    const memo = generateMemoFromMarkers(markers);
+    updateCurrent({ markers, memo });
+  }, [currentMeta?.markers, updateCurrent]);
+
+  const handleEditMarker = useCallback((markerId, changes) => {
+    const markers = (currentMeta?.markers || []).map(m =>
+      m.id === markerId ? { ...m, ...changes } : m
+    );
+    const memo = generateMemoFromMarkers(markers);
+    updateCurrent({ markers, memo });
+  }, [currentMeta?.markers, updateCurrent]);
+
+  const handleDeleteMarker = useCallback((markerId) => {
+    const markers = (currentMeta?.markers || []).filter(m => m.id !== markerId);
+    const memo = generateMemoFromMarkers(markers);
+    updateCurrent({ markers, memo });
+  }, [currentMeta?.markers, updateCurrent]);
 
   const manualSave = useCallback(() => {
     flushAllSaves();
@@ -649,53 +803,103 @@ export default function App() {
           </div>
         </Section>
 
-        <Section title="現場メモ">
-          <DiagnosisChips onInsert={handleInsertDiagnosis} />
-
-          <div className="mt-2 mb-3">
-            <ThreeChoicePanel meta={currentMeta} onChange={updateCurrent} />
-          </div>
-
-          <textarea
-            value={currentMeta.memo}
-            onChange={e => updateCurrent({ memo: e.target.value })}
-            rows={8}
-            className="w-full px-3 py-2 border border-stone-300 text-sm focus:outline-none focus:border-emerald-700 leading-relaxed"
-            placeholder={"例：\n根元:露出根被害5×20cm、踏圧\n幹:傾斜・小（南方向）\n大枝:被圧により葉が少なめ"}
-          />
-          <p className="text-[11px] text-stone-500 mt-2">
-            部位（根元・幹・大枝）・寸法・方向・程度を含めると、後でカルテへ落とし込みやすくなります
-          </p>
-        </Section>
-
-        <Section title="診断判定">
-          <JudgmentPanel meta={currentMeta} onChange={updateCurrent} />
-        </Section>
-
         <Section title={`写真 (${currentPhotos.length}枚)`}>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
-            {currentPhotos.map((p) => (
-              <PhotoCard
-                key={p.id}
-                photo={p}
-                onView={() => setViewingPhoto(p)}
-                onChange={(changes) => updatePhoto(p.id, changes)}
-                onRemove={() => removePhoto(p.id)}
-              />
-            ))}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => cameraInputRef.current?.click()} className="py-3 border border-stone-300 bg-white text-sm hover:border-emerald-700 hover:text-emerald-800 flex items-center justify-center gap-2 transition-colors">
+          {/* 旧形式データの変換促進バナー */}
+          {currentMeta._legacyMemo && (!currentMeta.markers || currentMeta.markers.length === 0) && (
+            <div className="mb-3 p-3 bg-amber-50 border border-amber-300 rounded-lg">
+              <p className="text-xs text-amber-900 mb-2">
+                この樹は旧形式です。現場メモを写真マーカーに変換しますか？
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    // メモからマーカーを自動生成（デフォルト位置に配置）
+                    const lines = (currentMeta._legacyMemo || '').split(/\r?\n/);
+                    const newMarkers = [];
+                    const partYPositions = { '根元': 0.85, '幹': 0.55, '大枝': 0.25 };
+                    for (const line of lines) {
+                      const m = line.match(/^(根元|幹|大枝)[:：](.+)$/);
+                      if (!m) continue;
+                      const part = m[1];
+                      const items = m[2].split(/[、,]/).map(s => s.trim()).filter(Boolean);
+                      items.forEach((item, idx) => {
+                        const mx = 0.3 + idx * 0.15;
+                        const my = partYPositions[part] || 0.5;
+                        newMarkers.push({
+                          id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                          x: mx,
+                          y: my,
+                          labelX: mx,
+                          labelY: Math.max(0.02, my - 0.12),
+                          part,
+                          item,
+                          collapsed: false,
+                          createdAt: new Date().toISOString(),
+                        });
+                      });
+                    }
+                    const memo = generateMemoFromMarkers(newMarkers);
+                    updateCurrent({ markers: newMarkers, memo, _legacyMemo: undefined });
+                  }}
+                  className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+                >
+                  変換する
+                </button>
+                <button
+                  onClick={() => updateCurrent({ _legacyMemo: undefined })}
+                  className="px-3 py-1.5 text-xs border border-stone-300 text-stone-700 rounded hover:bg-stone-50"
+                >
+                  そのまま使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          <PhotoFrameGrid
+            photos={currentPhotos}
+            markers={currentMeta.markers || []}
+            onTakePhoto={handleTakePhotoForRole}
+            onPickPhoto={handlePickPhotoForRole}
+            onViewPhoto={(photo) => setViewingPhoto(photo)}
+            onRemovePhoto={removePhoto}
+            onSwapRole={handleSwapRole}
+            markerOverlay={
+              currentPhotos.find(p => p.role === 'main') ? (
+                <MarkerOverlay
+                  imageUrl={currentPhotos.find(p => p.role === 'main').dataUrl}
+                  markers={currentMeta.markers || []}
+                  onAddMarker={handleAddMarker}
+                  onEditMarker={handleEditMarker}
+                  onDeleteMarker={handleDeleteMarker}
+                  selectedMarkerId={selectedMarkerId}
+                  onSelectMarker={setSelectedMarkerId}
+                />
+              ) : null
+            }
+          />
+
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <button onClick={() => { pendingRoleRef.current = 'spare'; cameraInputRef.current?.click(); }} className="py-3 border border-stone-300 bg-white text-sm hover:border-emerald-700 hover:text-emerald-800 flex items-center justify-center gap-2 transition-colors">
               <Camera className="w-4 h-4" />
-              カメラで撮影
+              予備写真を撮影
             </button>
-            <button onClick={() => fileInputRef.current?.click()} className="py-3 border border-stone-300 bg-white text-sm hover:border-emerald-700 hover:text-emerald-800 flex items-center justify-center gap-2 transition-colors">
+            <button onClick={() => { pendingRoleRef.current = 'spare'; fileInputRef.current?.click(); }} className="py-3 border border-stone-300 bg-white text-sm hover:border-emerald-700 hover:text-emerald-800 flex items-center justify-center gap-2 transition-colors">
               <ImageIcon className="w-4 h-4" />
-              ライブラリから
+              予備写真を選択
             </button>
           </div>
           <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={addPhotos} className="hidden" />
           <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={addPhotos} className="hidden" />
+          <input ref={cameraRoleInputRef} type="file" accept="image/*" capture="environment" onChange={addPhotosWithRole} className="hidden" />
+          <input ref={fileRoleInputRef} type="file" accept="image/*" multiple onChange={addPhotosWithRole} className="hidden" />
+        </Section>
+
+        <Section title="3択項目">
+          <ThreeChoicePanel meta={currentMeta} onChange={updateCurrent} />
+        </Section>
+
+        <Section title="診断判定">
+          <JudgmentPanel meta={currentMeta} onChange={updateCurrent} />
         </Section>
       </main>
 

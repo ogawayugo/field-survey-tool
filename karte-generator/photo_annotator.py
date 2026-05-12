@@ -160,6 +160,202 @@ def annotate_photo(photo_input, annotations, output_format="JPEG", output_qualit
     return output
 
 
+# ==================== マーカー焼き込み（写真ファーストフロー） ====================
+
+def draw_text_with_outline(draw, x, y, text, font, text_color=(0, 0, 0),
+                           outline_color=(255, 255, 255), outline_width=2):
+    """白フチ付き黒テキストを描画する。"""
+    for dx in range(-outline_width, outline_width + 1):
+        for dy in range(-outline_width, outline_width + 1):
+            if dx == 0 and dy == 0:
+                continue
+            draw.text((x + dx, y + dy), text, fill=outline_color, font=font)
+    draw.text((x, y), text, fill=text_color, font=font)
+
+
+def annotate_photo_with_markers(photo_input, markers, output_format="JPEG", output_quality=92):
+    """
+    写真ファーストフローのマーカーを焼き込む。
+    テキストボックス（白背景+黒文字+部位色枠）+ 矢印 + 対象点。
+    折り畳み状態（collapsed）のマーカーも展開して描画する。
+
+    Args:
+        photo_input: 画像ファイルパス, bytes, または BytesIO
+        markers: [{"x": 0.42, "y": 0.78, "part": "根元", "item": "不自然な傾斜"}, ...]
+        output_format: "JPEG" or "PNG"
+        output_quality: JPEG画質
+    Returns:
+        BytesIO
+    """
+    img = Image.open(photo_input).convert("RGB")
+    width, height = img.size
+
+    if not markers:
+        output = io.BytesIO()
+        img.save(output, format=output_format, quality=output_quality)
+        output.seek(0)
+        return output
+
+    draw = ImageDraw.Draw(img)
+
+    font_size = max(16, int(width * 0.028))
+    font = get_japanese_font(font_size)
+    box_padding = max(4, int(width * 0.006))
+    box_border = max(2, int(width * 0.003))
+    arrow_width = max(2, int(width * 0.003))
+    target_radius = max(4, int(width * 0.005))
+    box_offset_y = max(40, int(height * 0.06))
+
+    # 部位色 (R, G, B)
+    PART_COLOR_MAP = {
+        '根元': (37, 99, 235),    # blue-600
+        '幹':   (22, 163, 74),    # green-600
+        '大枝': (220, 38, 38),    # red-600
+    }
+
+    for marker in markers:
+        try:
+            mx = max(0.0, min(1.0, marker["x"])) * width
+            my = max(0.0, min(1.0, marker["y"])) * height
+            part = str(marker.get("part", ""))
+            item = str(marker.get("item", ""))
+        except (KeyError, TypeError):
+            continue
+
+        text = item if item else part
+        if not text.strip():
+            continue
+
+        color = PART_COLOR_MAP.get(part, (0, 0, 0))
+
+        # テキストサイズ計測
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        # テキストボックス位置: labelX/labelY があればそれを使用、なければデフォルト
+        if "labelX" in marker and "labelY" in marker:
+            box_cx = max(0.0, min(1.0, marker["labelX"])) * width
+            box_cy = max(0.0, min(1.0, marker["labelY"])) * height
+        else:
+            box_cx = mx
+            box_cy = my - box_offset_y
+
+        box_left = int(box_cx - text_w / 2 - box_padding)
+        box_right = int(box_cx + text_w / 2 + box_padding)
+        box_top = int(box_cy - text_h / 2 - box_padding)
+        box_bottom = int(box_cy + text_h / 2 + box_padding)
+
+        # 画面外はみ出し補正
+        if box_left < 4:
+            shift = 4 - box_left
+            box_left += shift
+            box_right += shift
+            box_cx += shift
+        if box_right > width - 4:
+            shift = box_right - (width - 4)
+            box_left -= shift
+            box_right -= shift
+            box_cx -= shift
+        if box_top < 4:
+            box_top = 4
+            box_bottom = box_top + text_h + box_padding * 2
+            box_cy = (box_top + box_bottom) / 2
+        if box_bottom > height - 4:
+            box_bottom = height - 4
+            box_top = box_bottom - text_h - box_padding * 2
+            box_cy = (box_top + box_bottom) / 2
+
+        # 白背景テキストボックス
+        draw.rectangle(
+            [box_left, box_top, box_right, box_bottom],
+            fill=(255, 255, 255),
+        )
+        # 部位色の枠線
+        draw.rectangle(
+            [box_left, box_top, box_right, box_bottom],
+            outline=color, width=box_border,
+        )
+        # 黒テキスト
+        text_x = int(box_cx - text_w / 2)
+        text_y = int(box_cy - text_h / 2) - bbox[1]
+        draw.text((text_x, text_y), text, fill=(0, 0, 0), font=font)
+
+        # 矢印（テキストボックス下辺中央 → 対象点）
+        arrow_start_y = box_bottom
+        arrow_end_y = int(my) - target_radius
+        if box_cy > my:
+            # テキストボックスが下にある場合
+            arrow_start_y = box_top
+            arrow_end_y = int(my) + target_radius
+        draw.line(
+            [(int(box_cx), arrow_start_y), (int(mx), arrow_end_y)],
+            fill=color, width=arrow_width,
+        )
+
+        # 矢じり（三角形）
+        head_size = max(6, int(width * 0.008))
+        if box_cy < my:
+            # 下向き矢じり
+            draw.polygon([
+                (int(mx), int(my) - target_radius),
+                (int(mx) - head_size, int(my) - target_radius - head_size),
+                (int(mx) + head_size, int(my) - target_radius - head_size),
+            ], fill=color)
+        else:
+            # 上向き矢じり
+            draw.polygon([
+                (int(mx), int(my) + target_radius),
+                (int(mx) - head_size, int(my) + target_radius + head_size),
+                (int(mx) + head_size, int(my) + target_radius + head_size),
+            ], fill=color)
+
+        # 対象点 or 範囲線分
+        if marker.get("type") == "range" and "rangeStart" in marker and "rangeEnd" in marker:
+            # 範囲マーカー: 軸線 + 端線（軸に垂直）
+            rs = marker["rangeStart"]
+            re = marker["rangeEnd"]
+            rx1 = int(max(0.0, min(1.0, rs["x"])) * width)
+            ry1 = int(max(0.0, min(1.0, rs["y"])) * height)
+            rx2 = int(max(0.0, min(1.0, re["x"])) * width)
+            ry2 = int(max(0.0, min(1.0, re["y"])) * height)
+            range_line_w = max(2, int(width * 0.003))
+
+            # 軸線
+            draw.line([(rx1, ry1), (rx2, ry2)], fill=color, width=range_line_w)
+
+            # 軸に垂直な端線を計算
+            rdx = rx2 - rx1
+            rdy = ry2 - ry1
+            r_len = math.sqrt(rdx * rdx + rdy * rdy)
+            if r_len > 0:
+                perp_x = -rdy / r_len
+                perp_y = rdx / r_len
+                end_half = max(8, min(20, r_len * 0.15))
+                # 始点の端線
+                draw.line([
+                    (int(rx1 + perp_x * end_half), int(ry1 + perp_y * end_half)),
+                    (int(rx1 - perp_x * end_half), int(ry1 - perp_y * end_half)),
+                ], fill=color, width=range_line_w)
+                # 終点の端線
+                draw.line([
+                    (int(rx2 + perp_x * end_half), int(ry2 + perp_y * end_half)),
+                    (int(rx2 - perp_x * end_half), int(ry2 - perp_y * end_half)),
+                ], fill=color, width=range_line_w)
+        else:
+            # 通常: 対象点（部位色の丸）
+            draw.ellipse(
+                (int(mx) - target_radius, int(my) - target_radius,
+                 int(mx) + target_radius, int(my) + target_radius),
+                fill=color, outline=(255, 255, 255), width=1,
+            )
+
+    output = io.BytesIO()
+    img.save(output, format=output_format, quality=output_quality)
+    output.seek(0)
+    return output
+
+
 # ==================== スタンドアロンテスト ====================
 
 if __name__ == "__main__":

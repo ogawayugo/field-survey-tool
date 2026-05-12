@@ -1,5 +1,32 @@
 // src/lib/generateJudgmentReason.js
 
+// ==================== マーカー → メモ変換 ====================
+
+/**
+ * markers配列からmemo文字列を自動生成
+ * 部位ごとにグルーピングし、「部位：項目1、項目2」形式で出力
+ */
+export function generateMemoFromMarkers(markers) {
+  if (!markers || markers.length === 0) return '';
+
+  const partOrder = ['根元', '幹', '大枝'];
+  const grouped = {};
+  for (const m of markers) {
+    if (!grouped[m.part]) grouped[m.part] = [];
+    if (!grouped[m.part].includes(m.item)) {
+      grouped[m.part].push(m.item);
+    }
+  }
+
+  const lines = [];
+  for (const part of partOrder) {
+    if (grouped[part] && grouped[part].length > 0) {
+      lines.push(`${part}:${grouped[part].join('、')}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 // ==================== 活力判定 ====================
 
 /**
