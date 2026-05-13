@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Leaf, Plus, Trash2, Camera, Download, ChevronLeft, ChevronRight, Save, Check, Settings, Image as ImageIcon } from 'lucide-react';
+import { Leaf, Plus, Trash2, Camera, Download, ChevronLeft, ChevronRight, Save, Check, Settings, Image as ImageIcon, Undo2, Redo2, X } from 'lucide-react';
 
 import { storage } from './lib/storage';
 import { compressImage } from './lib/imageCompress';
@@ -17,9 +17,14 @@ import PhotoFrameGrid from './components/PhotoFrameGrid';
 import MarkerOverlay from './components/MarkerOverlay';
 import ExportModal from './components/ExportModal';
 import SettingsModal from './components/SettingsModal';
-import JudgmentPanel from './components/JudgmentPanel';
+import JudgmentPanel, { JudgmentButton } from './components/JudgmentPanel';
 import ThreeChoicePanel from './components/ThreeChoicePanel.jsx';
-import { generateMemoFromMarkers } from './lib/generateJudgmentReason.js';
+import ObservationPanel from './components/ObservationPanel';
+import TreatmentPanel from './components/TreatmentPanel';
+import NextDiagnosisPanel from './components/NextDiagnosisPanel';
+import LocationPanel from './components/LocationPanel';
+import { generateMemoFromMarkers, generateVitalityReason } from './lib/generateJudgmentReason.js';
+import { JUDGMENT_LEVELS } from './config/constants.js';
 
 const emptyMeta = (id) => ({
   id,
@@ -33,6 +38,7 @@ const emptyMeta = (id) => ({
   vitalitySei: '',
   vitalityKei: '',
   memo: '',
+  memoSupplement: '',
   photoIds: [],
   markers: [],
   vitalityJudgment: '',
@@ -48,6 +54,10 @@ const emptyMeta = (id) => ({
   overallJudgment: '',
   overallReason: '',
   specialNotes: '',
+  treatment: null,
+  nextDiagnosis: null,
+  nextDiagnosisTiming: null,
+  location: null,
   createdAt: new Date().toISOString(),
 });
 
@@ -73,6 +83,9 @@ export default function App() {
   const [showExport, setShowExport] = useState(false);
   const [viewingPhoto, setViewingPhoto] = useState(null);
   const [selectedMarkerId, setSelectedMarkerId] = useState(null);
+  const [markerHistory, setMarkerHistory] = useState([]);
+  const [markerRedoStack, setMarkerRedoStack] = useState([]);
+  const [isUndoBarOpen, setIsUndoBarOpen] = useState(true);
 
   const allMetaRef = useRef(allMeta);
   const loadedPhotosRef = useRef(loadedPhotos);
@@ -201,6 +214,11 @@ export default function App() {
     if (meta.overallJudgment === undefined) meta.overallJudgment = '';
     if (meta.overallReason === undefined) meta.overallReason = '';
     if (meta.specialNotes === undefined) meta.specialNotes = '';
+    if (meta.memoSupplement === undefined) meta.memoSupplement = '';
+    if (meta.treatment === undefined) meta.treatment = null;
+    if (meta.nextDiagnosis === undefined) meta.nextDiagnosis = null;
+    if (meta.nextDiagnosisTiming === undefined) meta.nextDiagnosisTiming = null;
+    if (meta.location === undefined) meta.location = null;
     // 写真ファーストフロー: markersフィールド補完
     if (!meta.markers) {
       meta.markers = [];
@@ -332,6 +350,9 @@ export default function App() {
   const switchTree = useCallback(async (idx) => {
     if (idx === currentIdx) return;
     setCurrentIdx(idx);
+    setMarkerHistory([]);
+    setMarkerRedoStack([]);
+    setSelectedMarkerId(null);
     await loadPhotosForWindow(idx);
   }, [currentIdx]);
 
@@ -347,6 +368,9 @@ export default function App() {
     allMetaRef.current = { ...allMetaRef.current, [newId]: newMeta };
 
     setCurrentIdx(newIds.length - 1);
+    setMarkerHistory([]);
+    setMarkerRedoStack([]);
+    setSelectedMarkerId(null);
 
     runIdle(async () => {
       try {
@@ -394,6 +418,9 @@ export default function App() {
 
     const newIdx = Math.max(0, currentIdx - 1);
     setCurrentIdx(newIdx);
+    setMarkerHistory([]);
+    setMarkerRedoStack([]);
+    setSelectedMarkerId(null);
 
     runIdle(async () => {
       try { await storage.set(STORAGE.index, JSON.stringify(newIds)); } catch (e) { console.error(e); }
@@ -594,6 +621,20 @@ export default function App() {
     }
   }, [currentId]);
 
+  // マーカー履歴: 現在の樹のマーカー配列のスナップショットを履歴に積む（最大20件）
+  // 新規操作なので redo スタックはクリア
+  const pushMarkerHistory = useCallback(() => {
+    if (!currentId) return;
+    const cur = allMetaRef.current[currentId];
+    if (!cur) return;
+    const snapshot = cur.markers || [];
+    setMarkerHistory(prev => {
+      const next = [...prev, snapshot];
+      return next.length > 20 ? next.slice(-20) : next;
+    });
+    setMarkerRedoStack([]);
+  }, [currentId]);
+
   // マーカー操作ハンドラー
   const handleAddMarker = useCallback((marker) => {
     const markers = [...(currentMeta?.markers || []), marker];
@@ -614,6 +655,38 @@ export default function App() {
     const memo = generateMemoFromMarkers(markers);
     updateCurrent({ markers, memo });
   }, [currentMeta?.markers, updateCurrent]);
+
+  const handleUndoMarker = useCallback(() => {
+    if (!currentId) return;
+    if (markerHistory.length === 0) return;
+    const cur = allMetaRef.current[currentId];
+    const currentMarkers = cur?.markers || [];
+    const last = markerHistory[markerHistory.length - 1];
+    const memo = generateMemoFromMarkers(last);
+    updateMeta(currentId, { markers: last, memo });
+    setMarkerHistory(prev => prev.slice(0, -1));
+    setMarkerRedoStack(prev => {
+      const next = [...prev, currentMarkers];
+      return next.length > 20 ? next.slice(-20) : next;
+    });
+    setSelectedMarkerId(null);
+  }, [currentId, markerHistory, updateMeta]);
+
+  const handleRedoMarker = useCallback(() => {
+    if (!currentId) return;
+    if (markerRedoStack.length === 0) return;
+    const cur = allMetaRef.current[currentId];
+    const currentMarkers = cur?.markers || [];
+    const next = markerRedoStack[markerRedoStack.length - 1];
+    const memo = generateMemoFromMarkers(next);
+    updateMeta(currentId, { markers: next, memo });
+    setMarkerRedoStack(prev => prev.slice(0, -1));
+    setMarkerHistory(prev => {
+      const nextHist = [...prev, currentMarkers];
+      return nextHist.length > 20 ? nextHist.slice(-20) : nextHist;
+    });
+    setSelectedMarkerId(null);
+  }, [currentId, markerRedoStack, updateMeta]);
 
   const manualSave = useCallback(() => {
     flushAllSaves();
@@ -793,13 +866,47 @@ export default function App() {
         </Section>
 
         <Section title="活力度">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 mb-4">
             <Field label="樹勢 (1-5)">
               <SegmentedControl options={['1', '2', '3', '4', '5']} value={currentMeta.vitalitySei} onChange={v => updateCurrent({ vitalitySei: v })} compact />
             </Field>
             <Field label="樹形 (1-5)">
               <SegmentedControl options={['1', '2', '3', '4', '5']} value={currentMeta.vitalityKei} onChange={v => updateCurrent({ vitalityKei: v })} compact />
             </Field>
+          </div>
+
+          {/* 活力判定 */}
+          <div>
+            <p className="text-[11px] text-stone-600 mb-2">活力判定</p>
+            <div className="grid grid-cols-4 gap-1">
+              {JUDGMENT_LEVELS.map(level => (
+                <JudgmentButton
+                  key={level}
+                  value={level}
+                  current={currentMeta.vitalityJudgment}
+                  onChange={v => updateCurrent({ vitalityJudgment: v })}
+                />
+              ))}
+            </div>
+            <div className="mt-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] text-stone-600">判定理由</span>
+                <button
+                  type="button"
+                  onClick={() => updateCurrent({ vitalityReason: generateVitalityReason(currentMeta) })}
+                  className="text-[11px] px-2 py-0.5 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded"
+                >
+                  ✨ 診断文生成
+                </button>
+              </div>
+              <textarea
+                value={currentMeta.vitalityReason || ''}
+                onChange={e => updateCurrent({ vitalityReason: e.target.value })}
+                placeholder="「✨ 診断文生成」ボタンで自動入力、または直接記述"
+                rows={2}
+                className="w-full p-2 border border-stone-300 rounded text-xs resize-y"
+              />
+            </div>
           </div>
         </Section>
 
@@ -873,6 +980,7 @@ export default function App() {
                   onDeleteMarker={handleDeleteMarker}
                   selectedMarkerId={selectedMarkerId}
                   onSelectMarker={setSelectedMarkerId}
+                  onPushHistory={pushMarkerHistory}
                 />
               ) : null
             }
@@ -898,10 +1006,114 @@ export default function App() {
           <ThreeChoicePanel meta={currentMeta} onChange={updateCurrent} />
         </Section>
 
+        <Section title="所見">
+          <ObservationPanel
+            key={currentId}
+            markers={currentMeta.markers || []}
+            memoSupplement={currentMeta.memoSupplement || ''}
+            onEditMarker={(markerId, changes) => {
+              pushMarkerHistory();
+              handleEditMarker(markerId, changes);
+            }}
+            onChangeSupplement={(v) => updateCurrent({ memoSupplement: v })}
+          />
+        </Section>
+
         <Section title="診断判定">
           <JudgmentPanel meta={currentMeta} onChange={updateCurrent} />
         </Section>
+
+        <Section title="処置内容">
+          <TreatmentPanel
+            treatment={currentMeta.treatment}
+            onChange={(v) => updateCurrent({ treatment: v })}
+          />
+        </Section>
+
+        <Section title="次回診断">
+          <NextDiagnosisPanel
+            nextDiagnosis={currentMeta.nextDiagnosis}
+            nextDiagnosisTiming={currentMeta.nextDiagnosisTiming}
+            onChangeDiagnosis={(v) => updateCurrent({ nextDiagnosis: v })}
+            onChangeTiming={(v) => updateCurrent({ nextDiagnosisTiming: v })}
+          />
+        </Section>
+
+        <Section title="位置座標">
+          <LocationPanel
+            location={currentMeta.location}
+            onChange={(v) => updateCurrent({ location: v })}
+          />
+        </Section>
+
+        <Section title="特記事項">
+          <textarea
+            value={currentMeta.specialNotes || ''}
+            onChange={e => updateCurrent({ specialNotes: e.target.value })}
+            placeholder="現場では書ききれなかった所感、次回フォローアップ事項、管理者への申し送りなど"
+            rows={3}
+            className="w-full p-2 border border-stone-300 rounded text-xs resize-y focus:outline-none focus:border-emerald-700"
+          />
+        </Section>
       </main>
+
+      {/* マーカー操作の浮動バー（どこからでも undo/redo） */}
+      <div
+        className="fixed z-30"
+        style={{ left: 12, bottom: 84 }}
+      >
+        {isUndoBarOpen ? (
+          <div
+            className="flex items-center gap-0.5 border border-stone-300 rounded-full shadow-lg px-1.5 py-1"
+            style={{ background: 'rgba(255, 255, 255, 0.97)', backdropFilter: 'blur(6px)' }}
+          >
+            <button
+              type="button"
+              onClick={handleUndoMarker}
+              disabled={markerHistory.length === 0}
+              className="px-2 py-1.5 rounded-full text-stone-700 flex items-center gap-1 text-xs disabled:opacity-30 disabled:cursor-not-allowed enabled:hover:bg-stone-100 transition-colors"
+              title="直前のマーカー操作を取り消す"
+            >
+              <Undo2 className="w-3.5 h-3.5" strokeWidth={2} />
+              {markerHistory.length > 0 && (
+                <span className="text-[10px] text-stone-500 leading-none">{markerHistory.length}</span>
+              )}
+            </button>
+            <div className="w-px h-4 bg-stone-300" />
+            <button
+              type="button"
+              onClick={handleRedoMarker}
+              disabled={markerRedoStack.length === 0}
+              className="px-2 py-1.5 rounded-full text-stone-700 flex items-center gap-1 text-xs disabled:opacity-30 disabled:cursor-not-allowed enabled:hover:bg-stone-100 transition-colors"
+              title="取り消した操作をやり直す"
+            >
+              <Redo2 className="w-3.5 h-3.5" strokeWidth={2} />
+              {markerRedoStack.length > 0 && (
+                <span className="text-[10px] text-stone-500 leading-none">{markerRedoStack.length}</span>
+              )}
+            </button>
+            <div className="w-px h-4 bg-stone-300" />
+            <button
+              type="button"
+              onClick={() => setIsUndoBarOpen(false)}
+              className="px-1.5 py-1.5 rounded-full text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
+              title="バーを隠す"
+            >
+              <X className="w-3 h-3" strokeWidth={2} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setIsUndoBarOpen(true)}
+            className="p-2 border border-stone-300 rounded-full shadow-lg text-stone-600 hover:bg-stone-100 transition-colors"
+            style={{ background: 'rgba(255, 255, 255, 0.97)', backdropFilter: 'blur(6px)' }}
+            title="操作バーを表示"
+          >
+            <Undo2 className="w-4 h-4" strokeWidth={2} />
+          </button>
+        )}
+      </div>
 
       <footer className="fixed bottom-0 left-0 right-0 border-t border-stone-300 z-20" style={{ background: 'rgba(250, 247, 241, 0.96)', backdropFilter: 'blur(8px)' }}>
         <div className="max-w-4xl mx-auto px-4 py-3 flex gap-2">

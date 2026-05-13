@@ -47,6 +47,9 @@ try:
         write_three_choice_circumference,
         write_shoken,
         write_overall_judgment,
+        write_treatment,
+        write_next_diagnosis,
+        write_location,
         embed_photos,
     )
     from openpyxl import load_workbook
@@ -162,10 +165,13 @@ def generate_karte_from_multiple_jsons(json_paths, output_path, template_id, pro
             write_three_choice_circumference(new_sheet, tree, config)
             write_shoken(new_sheet, tree, config)
             write_overall_judgment(new_sheet, tree, config)
+            write_treatment(new_sheet, tree, config)
+            write_next_diagnosis(new_sheet, tree, config)
+            write_location(new_sheet, tree, config)
 
             photos = tree.get('photos', [])
             if photos:
-                embed_photos(new_sheet, photos, config)
+                embed_photos(new_sheet, photos, config, tree_data=tree)
         except Exception as e:
             print(f"WARN: 樹木 #{tree_no} の処理中にエラー: {e}")
             traceback.print_exc()

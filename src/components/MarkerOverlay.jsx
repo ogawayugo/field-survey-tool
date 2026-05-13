@@ -24,7 +24,11 @@ const MarkerOverlay = memo(function MarkerOverlay({
   onDeleteMarker,
   selectedMarkerId = null,
   onSelectMarker,
+  onPushHistory,
 }) {
+  const pushHistory = useCallback(() => {
+    if (onPushHistory) onPushHistory();
+  }, [onPushHistory]);
   const imgRef = useRef(null);
   const containerRef = useRef(null);
   const [pendingPos, setPendingPos] = useState(null);
@@ -62,6 +66,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
 
     if (hitMarker) {
       if (hitMarker.collapsed) {
+        pushHistory();
         onEditMarker(hitMarker.id, { collapsed: false });
       } else {
         setShowEditMenu(hitMarker);
@@ -71,7 +76,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
       if (onSelectMarker) onSelectMarker(null);
       setPendingPos({ x, y });
     }
-  }, [markers, editingTextId, onEditMarker, toNormalized, onSelectMarker]);
+  }, [markers, editingTextId, onEditMarker, toNormalized, onSelectMarker, pushHistory]);
 
   const handleSheetConfirm = useCallback((part, item) => {
     if (pendingPos) {
@@ -95,14 +100,16 @@ const MarkerOverlay = memo(function MarkerOverlay({
         newMarker.rangeStart = { x: pendingPos.x, y: Math.max(0, pendingPos.y - halfLen) };
         newMarker.rangeEnd = { x: pendingPos.x, y: Math.min(1, pendingPos.y + halfLen) };
       }
+      pushHistory();
       onAddMarker(newMarker);
       setPendingPos(null);
     }
     if (chipEditingMarker) {
+      pushHistory();
       onEditMarker(chipEditingMarker.id, { part, item });
       setChipEditingMarker(null);
     }
-  }, [pendingPos, chipEditingMarker, onAddMarker, onEditMarker]);
+  }, [pendingPos, chipEditingMarker, onAddMarker, onEditMarker, pushHistory]);
 
   const handleSheetCancel = useCallback(() => {
     setPendingPos(null);
@@ -116,18 +123,23 @@ const MarkerOverlay = memo(function MarkerOverlay({
 
   const handleDeleteFromMenu = useCallback(() => {
     if (showEditMenu && window.confirm(`「${showEditMenu.part}: ${showEditMenu.item}」を削除しますか？`)) {
+      pushHistory();
       onDeleteMarker(showEditMenu.id);
     }
     setShowEditMenu(null);
-  }, [showEditMenu, onDeleteMarker]);
+  }, [showEditMenu, onDeleteMarker, pushHistory]);
 
   const commitTextEdit = useCallback(() => {
     if (editingTextId && editingText.trim()) {
-      onEditMarker(editingTextId, { item: editingText.trim() });
+      const marker = markers.find(m => m.id === editingTextId);
+      if (!marker || marker.item !== editingText.trim()) {
+        pushHistory();
+        onEditMarker(editingTextId, { item: editingText.trim() });
+      }
     }
     setEditingTextId(null);
     setEditingText('');
-  }, [editingTextId, editingText, onEditMarker]);
+  }, [editingTextId, editingText, onEditMarker, markers, pushHistory]);
 
   // テキストボックスのドラッグ / タップ / 長押し
   const handleBoxPointerDown = useCallback((e, markerId) => {
@@ -138,6 +150,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
 
     longPressTimers.current[markerId] = setTimeout(() => {
       if (dragState.current && !dragState.current.moved) {
+        pushHistory();
         onEditMarker(markerId, { collapsed: true });
         dragState.current = null;
       }
@@ -149,6 +162,10 @@ const MarkerOverlay = memo(function MarkerOverlay({
       if (longPressTimers.current[markerId]) {
         clearTimeout(longPressTimers.current[markerId]);
         delete longPressTimers.current[markerId];
+      }
+      if (!dragState.current.moved) {
+        // 最初の移動でのみ履歴を積む（一連のドラッグを1操作として扱う）
+        pushHistory();
       }
       dragState.current.moved = true;
       const cx = ev.touches ? ev.touches[0].clientX : ev.clientX;
@@ -183,13 +200,66 @@ const MarkerOverlay = memo(function MarkerOverlay({
     window.addEventListener('pointerup', handleUp);
     window.addEventListener('touchmove', handleMove, { passive: false });
     window.addEventListener('touchend', handleUp);
-  }, [editingTextId, markers, onEditMarker, toNormalized, toggleSelect]);
+  }, [editingTextId, markers, onEditMarker, toNormalized, toggleSelect, pushHistory]);
+
+  // 点マーカーの対象点を個別にドラッグ（選択中のみ）
+  const pointDragState = useRef(null);
+  const handlePointTargetPointerDown = useCallback((e, markerId) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const marker = markers.find(m => m.id === markerId);
+    if (!marker) return;
+    // ドラッグ開始時の対象点位置とテキストボックス位置を記録（delta追従用）
+    pointDragState.current = {
+      markerId,
+      origX: marker.x,
+      origY: marker.y,
+      origLabelX: marker.labelX != null ? marker.labelX : marker.x,
+      origLabelY: marker.labelY != null ? marker.labelY : Math.max(0.02, marker.y - DEFAULT_LABEL_OFFSET_Y),
+      moved: false,
+    };
+
+    const handleMove = (ev) => {
+      ev.preventDefault();
+      const cx = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      const cy = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      const { x, y } = toNormalized(cx, cy);
+      const s = pointDragState.current;
+      if (!s) return;
+      if (!s.moved) {
+        pushHistory();
+      }
+      s.moved = true;
+      const dx = x - s.origX;
+      const dy = y - s.origY;
+      const newLabelX = Math.max(0, Math.min(1, s.origLabelX + dx));
+      const newLabelY = Math.max(0, Math.min(1, s.origLabelY + dy));
+      onEditMarker(markerId, {
+        x, y,
+        labelX: newLabelX,
+        labelY: newLabelY,
+      });
+    };
+
+    const handleUp = () => {
+      pointDragState.current = null;
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleUp);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleUp);
+  }, [markers, onEditMarker, toNormalized, pushHistory]);
 
   // 範囲マーカーの端点を個別にドラッグ（自由角度）
   const handleRangeHandlePointerDown = useCallback((e, markerId, endpoint) => {
     e.stopPropagation();
     e.preventDefault();
-    rangeDragState.current = { markerId, endpoint };
+    rangeDragState.current = { markerId, endpoint, moved: false };
 
     const handleMove = (ev) => {
       ev.preventDefault();
@@ -198,6 +268,10 @@ const MarkerOverlay = memo(function MarkerOverlay({
       const { x, y } = toNormalized(cx, cy);
       const marker = markers.find(m => m.id === markerId);
       if (!marker) return;
+      if (rangeDragState.current && !rangeDragState.current.moved) {
+        pushHistory();
+        rangeDragState.current.moved = true;
+      }
 
       if (endpoint === 'start') {
         onEditMarker(markerId, {
@@ -226,7 +300,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
     window.addEventListener('pointerup', handleUp);
     window.addEventListener('touchmove', handleMove, { passive: false });
     window.addEventListener('touchend', handleUp);
-  }, [markers, onEditMarker, toNormalized]);
+  }, [markers, onEditMarker, toNormalized, pushHistory]);
 
   const getLabelPos = (m) => {
     const lx = m.labelX != null ? m.labelX : m.x;
@@ -369,6 +443,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
+                  pushHistory();
                   onEditMarker(m.id, { collapsed: false });
                 }}
               >
@@ -451,6 +526,33 @@ const MarkerOverlay = memo(function MarkerOverlay({
             </div>
           );
         })}
+
+        {/* 点マーカーの対象点ドラッグハンドル（選択中のみ） */}
+        {markers
+          .filter(m => (m.type ?? 'point') === 'point' && !m.collapsed && selectedMarkerId === m.id)
+          .map(m => {
+            const color = PART_COLORS[m.part] || '#6b7280';
+            return (
+              <div
+                key={`point-handle-${m.id}`}
+                className="absolute rounded-full"
+                style={{
+                  left: `${m.x * 100}%`,
+                  top: `${m.y * 100}%`,
+                  width: 22, height: 22,
+                  transform: 'translate(-50%, -50%)',
+                  backgroundColor: color,
+                  border: '3px solid white',
+                  boxShadow: '0 0 0 2px rgba(0,0,0,0.15), 0 2px 6px rgba(0,0,0,0.4)',
+                  cursor: 'grab',
+                  zIndex: 35,
+                  touchAction: 'none',
+                }}
+                onPointerDown={(e) => handlePointTargetPointerDown(e, m.id)}
+                title="ドラッグして対象点を移動"
+              />
+            );
+          })}
 
         {/* 範囲マーカーの両端ドラッグハンドル */}
         {markers.filter(m => m.type === 'range' && !m.collapsed && m.rangeStart && m.rangeEnd).map(m => {
@@ -546,6 +648,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
                       className="px-2 py-0.5 text-[10px] rounded border border-stone-300 bg-white text-stone-600 hover:bg-stone-100"
                       onClick={(e) => {
                         e.stopPropagation();
+                        pushHistory();
                         onEditMarker(m.id, { collapsed: !m.collapsed });
                         if (onSelectMarker) onSelectMarker(null);
                       }}
@@ -557,6 +660,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
                       onClick={(e) => {
                         e.stopPropagation();
                         if (window.confirm(`「${m.item}」を削除しますか？`)) {
+                          pushHistory();
                           onDeleteMarker(m.id);
                           if (onSelectMarker) onSelectMarker(null);
                         }

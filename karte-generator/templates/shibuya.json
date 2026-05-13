@@ -119,6 +119,36 @@
   "judgment_reason_cell": "F48",
   "special_notes_cell": "AW56",
 
+  "_comment_treatment": "処置内容セクション",
+  "treatment": {
+    "necessity_cell": "BD3",
+    "urgency_cell": "BY3",
+    "observation_cell": "AX4",
+    "pruning_combined_cell": "AX5",
+    "individual": {
+      "treeProtection":          { "cell": "AX6", "label": "樹体保護" },
+      "plantingBaseImprovement": { "cell": "BR6", "label": "植栽基盤の改善" },
+      "rootUplift":              { "cell": "AX7", "label": "根上がり" },
+      "pestControl":             { "cell": "BR7", "label": "病虫害防除" },
+      "renewal":                 { "cell": "AX8", "label": "更新" },
+      "other":                   { "cell": "BR8", "label": "その他" }
+    },
+    "summary_cell": "AX9"
+  },
+
+  "_comment_next_diagnosis": "次回診断セクション",
+  "next_diagnosis": {
+    "main_cell": "BD62",
+    "instrumental_site_cell": "BL62",
+    "timing_cell": "BD63"
+  },
+
+  "_comment_location": "位置座標（WGS84）",
+  "location": {
+    "latitude_cell": "BG64",
+    "longitude_cell": "BX64"
+  },
+
   "_comment_photo_slots": "写真の配置（4枠）",
   "photo_slots": {
     "樹木全体": {

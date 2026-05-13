@@ -603,6 +603,233 @@ def write_overall_judgment(sheet: Worksheet, tree: dict, config: dict):
 
 
 # ===================================================================
+# 処置内容・次回診断・位置座標
+# ===================================================================
+
+def _replace_checkbox_in_text(text: str, target: str) -> str:
+    """セル内テキストの □target を ■target に置換。target が見つからなければ元のまま。"""
+    if not text or not target:
+        return text
+    escaped = re.escape(target)
+    pattern = re.compile(r'□(\s*)' + escaped)
+    if pattern.search(text):
+        # group 参照との衝突を避けるため lambda で置換
+        return pattern.sub(lambda m: '■' + m.group(1) + target, text)
+    # フォールバック
+    return text.replace(f'□{target}', f'■{target}')
+
+
+def write_treatment(sheet: Worksheet, tree: dict, config: dict):
+    """処置内容セクションの書き込み"""
+    treatment = tree.get('treatment')
+    if not treatment:
+        return
+
+    t_config = config.get('treatment')
+    if not t_config:
+        return
+
+    # 必要性（BD3：□なし □あり）
+    necessity = treatment.get('necessity', '')
+    if necessity in ('なし', 'あり'):
+        cell = t_config.get('necessity_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                sheet[cell] = _replace_checkbox_in_text(str(original), necessity)
+
+    # 緊急性（BY3）
+    urgency = treatment.get('urgency', '')
+    if urgency in ('なし', 'あり'):
+        cell = t_config.get('urgency_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                sheet[cell] = _replace_checkbox_in_text(str(original), urgency)
+
+    # 要観察（AX4）
+    obs = treatment.get('observation', '')
+    if obs in ('長期周期', '短期周期'):
+        cell = t_config.get('observation_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                target = f'要観察（{obs}）'
+                new_text = _replace_checkbox_in_text(str(original), target)
+                # フォールバック：「要観察(...)」形式の半角括弧バージョンも試す
+                if new_text == str(original):
+                    target_h = f'要観察({obs})'
+                    new_text = _replace_checkbox_in_text(str(original), target_h)
+                sheet[cell] = new_text
+
+    # 剪定＋風圧軽減＋スタブカット＋巻き根（AX5：1セル内の複数チェックボックス）
+    cell = t_config.get('pruning_combined_cell')
+    if cell:
+        original = sheet[cell].value
+        if original is not None:
+            text = str(original)
+            selected_options = []
+            if treatment.get('pruning'):
+                selected_options.append('剪定')
+                for p in treatment.get('pruning', []):
+                    selected_options.append(p)
+            if treatment.get('pressureReduction'):
+                selected_options.append('風圧軽減')
+            if treatment.get('stubCut'):
+                selected_options.append('スタブカット')
+            if treatment.get('rootCircling'):
+                selected_options.append('巻き根')
+            for opt in selected_options:
+                text = _replace_checkbox_in_text(text, opt)
+            if text != str(original):
+                sheet[cell] = text
+
+    # 個別処置（AX6, BR6, AX7, BR7, AX8, BR8）
+    individual_cfg = t_config.get('individual', {})
+    individual_data = treatment.get('individual', {}) or {}
+    for key, def_obj in individual_cfg.items():
+        item = individual_data.get(key, {}) or {}
+        if not item.get('checked'):
+            continue
+        target_cell = def_obj.get('cell')
+        label = def_obj.get('label', '')
+        if not target_cell or not label:
+            continue
+        original = sheet[target_cell].value
+        if original is None:
+            continue
+        note = item.get('note', '') or ''
+        text = str(original)
+        # 「□{label}（」を「■{label}（{note}」に置換（全角括弧）
+        before = f'□{label}（'
+        after_full = f'■{label}（{note}'
+        if before in text:
+            text = text.replace(before, after_full)
+        else:
+            # 半角括弧版
+            before_h = f'□{label}('
+            after_full_h = f'■{label}({note}'
+            if before_h in text:
+                text = text.replace(before_h, after_full_h)
+            else:
+                # 括弧なし。単純チェック反映
+                text = _replace_checkbox_in_text(text, label)
+        sheet[target_cell] = text
+
+    # 摘要（AX9：ラベルセルに上書きせず、補足を含めて記入）
+    summary = treatment.get('summary', '') or ''
+    if summary:
+        cell = t_config.get('summary_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is None or '摘要' not in str(original):
+                # 別セル想定。直接書き込み
+                sheet[cell] = summary
+            else:
+                # 「摘要」ラベルセル：後ろに改行して摘要内容を付加
+                sheet[cell] = f"{original}\n{summary}"
+
+
+def write_next_diagnosis(sheet: Worksheet, tree: dict, config: dict):
+    """次回診断セクションの書き込み"""
+    nd = tree.get('nextDiagnosis')
+    timing = tree.get('nextDiagnosisTiming')
+    nd_config = config.get('next_diagnosis')
+    if not nd_config:
+        return
+
+    # 次回診断（main_cell）BD62 にフォローアップ / 外観診断 のチェック
+    if nd:
+        main_cell = nd_config.get('main_cell')
+        if main_cell:
+            original = sheet[main_cell].value
+            if original is not None:
+                text = str(original)
+                if nd.get('followUp'):
+                    text = _replace_checkbox_in_text(text, 'フォローアップ診断')
+                if nd.get('appearance'):
+                    text = _replace_checkbox_in_text(text, '外観診断')
+                # 要機器診断は main_cell に含まれる場合と instrumental_site_cell に分かれる場合の両対応
+                if nd.get('instrumental', {}).get('checked'):
+                    text = _replace_checkbox_in_text(text, '要機器診断')
+                if text != str(original):
+                    sheet[main_cell] = text
+
+        # 要機器診断＋部位（BL62）
+        if nd.get('instrumental', {}).get('checked'):
+            site_cell = nd_config.get('instrumental_site_cell')
+            if site_cell:
+                original = sheet[site_cell].value
+                if original is not None:
+                    text = str(original)
+                    text = _replace_checkbox_in_text(text, '要機器診断')
+                    site = nd.get('instrumental', {}).get('site', '') or ''
+                    if site:
+                        # 「測定部位：」「測定部位:」の後ろに部位を挿入
+                        if '測定部位：' in text:
+                            # 行末まで or 既存値置換
+                            text = re.sub(r'(測定部位：)[^\n]*', r'\1' + site, text)
+                        elif '測定部位:' in text:
+                            text = re.sub(r'(測定部位:)[^\n]*', r'\1' + site, text)
+                        else:
+                            text = f"{text} 測定部位：{site}"
+                    sheet[site_cell] = text
+
+    # 再診断時期（BD63）
+    if timing:
+        years = timing.get('years')
+        if years in (1, 2, 3):
+            timing_cell = nd_config.get('timing_cell')
+            if timing_cell:
+                original = sheet[timing_cell].value
+                if original is not None:
+                    target = f'{years}年後'
+                    new_text = _replace_checkbox_in_text(str(original), target)
+                    # 年度が指定されていれば、N年後（...）の括弧内に挿入（全角/半角両対応）
+                    if timing.get('fiscalYear'):
+                        fy = timing.get('fiscalYear')
+                        pat_full = re.compile(rf'(■?{years}年後)（[^）]*）')
+                        if pat_full.search(new_text):
+                            new_text = pat_full.sub(f'■{years}年後（{fy}年度）', new_text)
+                        else:
+                            pat_half = re.compile(rf'(■?{years}年後)\([^)]*\)')
+                            if pat_half.search(new_text):
+                                new_text = pat_half.sub(f'■{years}年後({fy}年度)', new_text)
+                    if new_text != str(original):
+                        sheet[timing_cell] = new_text
+
+
+def write_location(sheet: Worksheet, tree: dict, config: dict):
+    """位置座標セクションの書き込み"""
+    loc = tree.get('location')
+    if not loc:
+        return
+    loc_config = config.get('location')
+    if not loc_config:
+        return
+
+    lat = loc.get('latitude', '')
+    lon = loc.get('longitude', '')
+
+    lat_cell = loc_config.get('latitude_cell')
+    if lat_cell and lat:
+        original = sheet[lat_cell].value
+        # ラベル「緯度」が含まれていれば連結、そうでなければ上書き
+        if original is None or '緯度' not in str(original):
+            sheet[lat_cell] = lat
+        else:
+            sheet[lat_cell] = f"{original} {lat}"
+
+    lon_cell = loc_config.get('longitude_cell')
+    if lon_cell and lon:
+        original = sheet[lon_cell].value
+        if original is None or '経度' not in str(original):
+            sheet[lon_cell] = lon
+        else:
+            sheet[lon_cell] = f"{original} {lon}"
+
+
+# ===================================================================
 # 写真の埋め込み
 # ===================================================================
 
@@ -776,6 +1003,9 @@ def generate_karte(json_path: Path, output_path: Path, template_id: str):
             write_three_choice_circumference(new_sheet, tree, config)
             write_shoken(new_sheet, tree, config)
             write_overall_judgment(new_sheet, tree, config)
+            write_treatment(new_sheet, tree, config)
+            write_next_diagnosis(new_sheet, tree, config)
+            write_location(new_sheet, tree, config)
 
             # 写真埋め込み
             photos = tree.get('photos', [])
