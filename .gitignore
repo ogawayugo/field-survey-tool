@@ -35,3 +35,10 @@ karte-generator/karte_sample.xlsx
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
