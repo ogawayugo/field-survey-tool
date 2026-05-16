@@ -1,5 +1,6 @@
 import { memo, useState, useCallback } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
+import { extractSummaryWithCache } from '../lib/markerExtractor';
 
 const PART_ORDER = ['根元', '幹', '大枝'];
 
@@ -12,11 +13,111 @@ const PART_COLORS = {
 /**
  * 所見欄: マーカー連動リスト + フリーテキスト
  *
- * - リストはマーカーから生成（順序：根元→幹→大枝、各部位内は追加順）
- * - リスト項目をタップすると編集モード、「反映」ボタンで対応マーカーに反映
+ * - 部位ごとにグルーピング表示（根元→幹→大枝）
+ * - 各マーカー行に textbox（自由記述）と summary（括弧内）を並べる
+ * - textbox 編集時、summaryEdited=false なら summary を自動再抽出
+ * - summary 編集時は summaryEdited=true をセット
+ * - ↻ ボタンで summary を再抽出して summaryEdited=false に戻す
  * - フリーテキストは memoSupplement に独立保存
- * - ヘッダータップで開閉
  */
+function MarkerRow({ marker, onEditMarker }) {
+  const color = PART_COLORS[marker.part] || '#6b7280';
+
+  const handleTextChange = useCallback((e) => {
+    // 高さ自動調整（最大 ~8行）
+    e.target.style.height = 'auto';
+    e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+
+    const newText = e.target.value;
+    const changes = { text: newText };
+    if (!marker.summaryEdited) {
+      changes.summary = extractSummaryWithCache(newText, marker.item, marker.part);
+    }
+    onEditMarker(marker.id, changes);
+  }, [marker.id, marker.item, marker.part, marker.summaryEdited, onEditMarker]);
+
+  const handleSummaryChange = useCallback((e) => {
+    onEditMarker(marker.id, {
+      summary: e.target.value,
+      summaryEdited: true,
+    });
+  }, [marker.id, onEditMarker]);
+
+  const handleReset = useCallback(() => {
+    const text = marker.text ?? marker.item ?? '';
+    const auto = extractSummaryWithCache(text, marker.item, marker.part);
+    onEditMarker(marker.id, {
+      summary: auto,
+      summaryEdited: false,
+    });
+  }, [marker.id, marker.item, marker.part, marker.text, onEditMarker]);
+
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <span
+        className="inline-block w-2 h-2 rounded-full flex-shrink-0 mt-2"
+        style={{ backgroundColor: color }}
+      />
+      <span
+        className="text-[10px] text-stone-500 flex-shrink-0 mt-1.5 px-1.5 py-0.5 rounded border"
+        style={{ borderColor: color, color }}
+        title="チップ名（部位/項目）"
+      >
+        {marker.item}
+      </span>
+      <textarea
+        value={marker.text ?? ''}
+        onChange={handleTextChange}
+        rows={1}
+        placeholder="textbox 自由記述"
+        ref={(el) => {
+          if (el) {
+            el.style.height = 'auto';
+            el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+          }
+        }}
+        className="flex-1 min-w-0 px-2 py-1 border border-stone-300 rounded text-xs focus:outline-none focus:border-emerald-700"
+        style={{
+          minHeight: 28,
+          maxHeight: 160,
+          resize: 'none',
+          overflowY: 'auto',
+          wordBreak: 'break-word',
+          whiteSpace: 'pre-wrap',
+          lineHeight: '1.4',
+        }}
+      />
+      <div className="flex items-center flex-shrink-0">
+        <span className="text-[11px] text-stone-500 mr-0.5">（</span>
+        <input
+          type="text"
+          value={marker.summary ?? ''}
+          onChange={handleSummaryChange}
+          placeholder=""
+          className="px-1.5 py-1 border rounded text-xs focus:outline-none"
+          style={{
+            width: 140,
+            borderColor: marker.summaryEdited ? '#d97706' : '#d6d3d1',
+            backgroundColor: marker.summaryEdited ? '#fff9d6' : 'white',
+          }}
+          title="括弧内表記（カルテ出力用）"
+        />
+        <span className="text-[11px] text-stone-500 ml-0.5 mr-1">）</span>
+        {marker.summaryEdited && (
+          <button
+            type="button"
+            onClick={handleReset}
+            className="px-1 py-1 text-[11px] rounded hover:bg-stone-100 text-amber-700"
+            title="自動抽出に戻す"
+          >
+            <RotateCcw className="w-3 h-3" strokeWidth={2} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const ObservationPanel = memo(function ObservationPanel({
   markers = [],
   memoSupplement = '',
@@ -24,35 +125,13 @@ const ObservationPanel = memo(function ObservationPanel({
   onChangeSupplement,
 }) {
   const [isOpen, setIsOpen] = useState(true);
-  const [editingId, setEditingId] = useState(null);
-  const [editingText, setEditingText] = useState('');
 
-  // 部位順にソート（部位内は追加順保持）
-  const orderedMarkers = [];
-  for (const part of PART_ORDER) {
-    for (const m of markers) {
-      if (m.part === part) orderedMarkers.push(m);
-    }
+  // 部位ごとにグルーピング（部位内は追加順保持）
+  const grouped = {};
+  for (const part of PART_ORDER) grouped[part] = [];
+  for (const m of markers) {
+    if (grouped[m.part]) grouped[m.part].push(m);
   }
-
-  const startEdit = useCallback((m) => {
-    setEditingId(m.id);
-    setEditingText(m.item);
-  }, []);
-
-  const cancelEdit = useCallback(() => {
-    setEditingId(null);
-    setEditingText('');
-  }, []);
-
-  const applyEdit = useCallback((markerId) => {
-    const trimmed = editingText.trim();
-    if (trimmed && onEditMarker) {
-      onEditMarker(markerId, { item: trimmed });
-    }
-    setEditingId(null);
-    setEditingText('');
-  }, [editingText, onEditMarker]);
 
   return (
     <div className="border border-stone-300 rounded">
@@ -72,68 +151,37 @@ const ObservationPanel = memo(function ObservationPanel({
 
       {isOpen && (
         <div className="border-t border-stone-200 p-3 space-y-3">
-          {/* マーカー由来リスト */}
-          {orderedMarkers.length === 0 ? (
+          {markers.length === 0 ? (
             <p className="text-[11px] text-stone-500 italic">
               写真にマーカーを追加すると、ここに自動で表示されます
             </p>
           ) : (
-            <ul className="space-y-1">
-              {orderedMarkers.map(m => {
-                const isEditing = editingId === m.id;
-                const color = PART_COLORS[m.part] || '#6b7280';
-                return (
-                  <li key={m.id} className="flex items-center gap-2 text-xs">
+            PART_ORDER.map(part => {
+              const items = grouped[part];
+              if (items.length === 0) return null;
+              const color = PART_COLORS[part];
+              return (
+                <div key={part}>
+                  <div className="flex items-center gap-2 mb-1">
                     <span
-                      className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                      className="inline-block w-2.5 h-2.5 rounded-full"
                       style={{ backgroundColor: color }}
                     />
-                    <span className="text-stone-600 flex-shrink-0" style={{ minWidth: 32 }}>
-                      {m.part}：
-                    </span>
-                    {isEditing ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingText}
-                          onChange={e => setEditingText(e.target.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') applyEdit(m.id);
-                            if (e.key === 'Escape') cancelEdit();
-                          }}
-                          autoFocus
-                          maxLength={50}
-                          className="flex-1 px-2 py-1 border border-blue-400 rounded text-xs focus:outline-none focus:border-blue-600"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => applyEdit(m.id)}
-                          className="px-2 py-1 text-[11px] rounded bg-blue-600 text-white hover:bg-blue-700 flex-shrink-0"
-                        >
-                          反映
-                        </button>
-                        <button
-                          type="button"
-                          onClick={cancelEdit}
-                          className="px-2 py-1 text-[11px] rounded border border-stone-300 text-stone-600 hover:bg-stone-50 flex-shrink-0"
-                        >
-                          取消
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => startEdit(m)}
-                        className="flex-1 text-left px-2 py-1 rounded hover:bg-stone-100 text-stone-800 truncate"
-                        title="タップして編集"
-                      >
-                        {m.item}
-                      </button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+                    <span className="text-xs font-medium text-stone-700">{part}</span>
+                    <span className="text-[10px] text-stone-400">({items.length})</span>
+                  </div>
+                  <div className="divide-y divide-stone-100">
+                    {items.map(m => (
+                      <MarkerRow
+                        key={m.id}
+                        marker={m}
+                        onEditMarker={onEditMarker}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })
           )}
 
           {/* 補足メモ */}

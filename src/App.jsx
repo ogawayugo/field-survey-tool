@@ -24,6 +24,7 @@ import TreatmentPanel from './components/TreatmentPanel';
 import NextDiagnosisPanel from './components/NextDiagnosisPanel';
 import LocationPanel from './components/LocationPanel';
 import { generateMemoFromMarkers, generateVitalityReason } from './lib/generateJudgmentReason.js';
+import { loadExtractionRules, extractSummaryWithCache } from './lib/markerExtractor.js';
 import { JUDGMENT_LEVELS } from './config/constants.js';
 
 const emptyMeta = (id) => ({
@@ -106,6 +107,9 @@ export default function App() {
 
   const loadAll = async () => {
     try {
+      // 抽出ルールを最優先で読み込み（以降の extractSummary 呼び出しで使う）
+      await loadExtractionRules();
+
       try {
         const r = await storage.get(STORAGE.meta);
         if (r) setSurveyMeta(JSON.parse(r.value));
@@ -227,14 +231,22 @@ export default function App() {
         meta._legacyMemo = meta.memo;
       }
     } else {
-      // 既存マーカーに collapsed / labelX / labelY / type がなければ追加
-      meta.markers = meta.markers.map(m => ({
-        ...m,
-        type: m.type ?? 'point',
-        collapsed: m.collapsed ?? false,
-        labelX: m.labelX ?? m.x,
-        labelY: m.labelY ?? Math.max(0.02, m.y - 0.12),
-      }));
+      // 既存マーカーに collapsed / labelX / labelY / type / text / summary / summaryEdited を補完
+      meta.markers = meta.markers.map(m => {
+        const next = {
+          ...m,
+          type: m.type ?? 'point',
+          collapsed: m.collapsed ?? false,
+          labelX: m.labelX ?? m.x,
+          labelY: m.labelY ?? Math.max(0.02, m.y - 0.12),
+        };
+        if (typeof next.text !== 'string') next.text = next.item || '';
+        if (typeof next.summaryEdited !== 'boolean') next.summaryEdited = false;
+        if (typeof next.summary !== 'string') {
+          next.summary = extractSummaryWithCache(next.text, next.item, next.part);
+        }
+        return next;
+      });
     }
     delete meta.diagnostics;
     return meta;
@@ -1011,10 +1023,7 @@ export default function App() {
             key={currentId}
             markers={currentMeta.markers || []}
             memoSupplement={currentMeta.memoSupplement || ''}
-            onEditMarker={(markerId, changes) => {
-              pushMarkerHistory();
-              handleEditMarker(markerId, changes);
-            }}
+            onEditMarker={handleEditMarker}
             onChangeSupplement={(v) => updateCurrent({ memoSupplement: v })}
           />
         </Section>

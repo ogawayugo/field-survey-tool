@@ -1,5 +1,6 @@
 import { memo, useState, useRef, useCallback } from 'react';
 import MarkerSheet from './MarkerSheet';
+import { extractSummaryWithCache } from '../lib/markerExtractor';
 
 const PART_COLORS = {
   '根元': '#2563eb',
@@ -92,6 +93,9 @@ const MarkerOverlay = memo(function MarkerOverlay({
         labelY,
         part,
         item,
+        text: item,                // textbox 初期値はチップ名
+        summary: '',               // 初期は空欄（textbox編集時に自動抽出される）
+        summaryEdited: false,
         collapsed: false,
         createdAt: new Date().toISOString(),
       };
@@ -106,7 +110,14 @@ const MarkerOverlay = memo(function MarkerOverlay({
     }
     if (chipEditingMarker) {
       pushHistory();
-      onEditMarker(chipEditingMarker.id, { part, item });
+      // チップ（part/item）が変わったので summary を再抽出
+      // ただし手動編集済みなら summary は維持
+      const changes = { part, item };
+      if (!chipEditingMarker.summaryEdited) {
+        const textForExtract = chipEditingMarker.text || item;
+        changes.summary = extractSummaryWithCache(textForExtract, item, part);
+      }
+      onEditMarker(chipEditingMarker.id, changes);
       setChipEditingMarker(null);
     }
   }, [pendingPos, chipEditingMarker, onAddMarker, onEditMarker, pushHistory]);
@@ -132,9 +143,16 @@ const MarkerOverlay = memo(function MarkerOverlay({
   const commitTextEdit = useCallback(() => {
     if (editingTextId && editingText.trim()) {
       const marker = markers.find(m => m.id === editingTextId);
-      if (!marker || marker.item !== editingText.trim()) {
+      const newText = editingText.trim();
+      const oldText = marker?.text ?? marker?.item ?? '';
+      if (marker && newText !== oldText) {
         pushHistory();
-        onEditMarker(editingTextId, { item: editingText.trim() });
+        const changes = { text: newText };
+        // 手動編集されていなければ summary を自動更新
+        if (!marker.summaryEdited) {
+          changes.summary = extractSummaryWithCache(newText, marker.item, marker.part);
+        }
+        onEditMarker(editingTextId, changes);
       }
     }
     setEditingTextId(null);
@@ -185,7 +203,7 @@ const MarkerOverlay = memo(function MarkerOverlay({
         const marker = markers.find(m => m.id === markerId);
         if (marker) {
           setEditingTextId(markerId);
-          setEditingText(marker.item);
+          setEditingText(marker.text ?? marker.item ?? '');
           toggleSelect(markerId);
         }
       }
@@ -491,36 +509,62 @@ const MarkerOverlay = memo(function MarkerOverlay({
                   boxShadow: isSelected
                     ? '0 4px 12px rgba(0,0,0,0.4)'
                     : '0 2px 6px rgba(0,0,0,0.25)',
-                  minWidth: 60,
-                  maxWidth: 200,
-                  whiteSpace: isEditingThis ? 'normal' : 'nowrap',
+                  minWidth: 80,
+                  maxWidth: 240,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
                   cursor: isEditingThis ? 'text' : 'grab',
                   userSelect: isEditingThis ? 'text' : 'none',
                   transition: 'border-width 0.2s ease, box-shadow 0.2s ease',
                 }}
               >
                 {isEditingThis ? (
-                  <input
-                    type="text"
+                  <textarea
                     value={editingText}
-                    onChange={(e) => setEditingText(e.target.value)}
+                    onChange={(e) => {
+                      // 高さ自動調整（max-height 内）
+                      e.target.style.height = 'auto';
+                      e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
+                      setEditingText(e.target.value);
+                    }}
                     onBlur={commitTextEdit}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') commitTextEdit();
+                      // Enter は改行を許可（commit は blur で行う）
                       if (e.key === 'Escape') {
+                        e.preventDefault();
                         setEditingTextId(null);
                         setEditingText('');
                       }
                     }}
                     autoFocus
-                    maxLength={50}
+                    rows={1}
+                    ref={(el) => {
+                      if (el) {
+                        el.style.height = 'auto';
+                        el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+                      }
+                    }}
                     className="w-full border-none outline-none bg-transparent text-black"
-                    style={{ fontSize: 'inherit', padding: 0, margin: 0 }}
+                    style={{
+                      fontSize: 'inherit',
+                      padding: 0,
+                      margin: 0,
+                      resize: 'none',
+                      overflowY: 'auto',
+                      wordBreak: 'break-word',
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: '1.35',
+                      minHeight: 18,
+                      maxHeight: 120,
+                      width: '100%',
+                      display: 'block',
+                      fontFamily: 'inherit',
+                    }}
                     onClick={(e) => e.stopPropagation()}
                     onPointerDown={(e) => e.stopPropagation()}
                   />
                 ) : (
-                  <span className="select-none">{m.item}</span>
+                  <span className="select-none">{m.text ?? m.item}</span>
                 )}
               </div>
             </div>
