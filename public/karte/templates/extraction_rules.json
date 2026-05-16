@@ -1,0 +1,169 @@
+{
+  "_meta": {
+    "description": "マーカーtextboxから括弧内表記を抽出するルール",
+    "reference": "東京都様式 表III-2・23 カルテ括弧内に記載する内容",
+    "version": "1.0"
+  },
+
+  "_styles": {
+    "_description": "各項目で使う抽出方式",
+    "pattern_format":      "fields の regex で field を取り出し、format に当てはめる",
+    "parens_or_fulltext":  "()や（）の中身を優先、なければ全文を採用",
+    "first_match":         "patterns を順に試し、最初にマッチしたものを採用",
+    "single_regex":        "単一regexでマッチしたsubstringをそのまま採用",
+    "part_dependent":      "マーカーのpartで異なるルールを適用（建築限界越え用）"
+  },
+
+  "_aggregations": {
+    "_description": "同じ(part, item)に複数マーカーがあるときの集約方式",
+    "default":  "1つ目の出力 + ' 他{N-1}箇所' (N>=2のとき)",
+    "count_x":  "1つ目の出力 + ' ×{N}' (N>=2のとき)"
+  },
+
+  "rules": {
+    "キノコ（子実体）": {
+      "guideline": "種類等",
+      "style": "parens_or_fulltext",
+      "aggregation": "default"
+    },
+
+    "木槌打診異常": {
+      "guideline": "異常音の程度（大小）・範囲（GLからの高さの範囲）",
+      "style": "pattern_format",
+      "fields": [
+        { "name": "severity", "regex": "(大|中|小)" },
+        { "name": "range",    "regex": "GL[+\\-]?\\s*[\\d\\.]+\\s*m?\\s*[〜~\\-]\\s*[+\\-]?\\s*[\\d\\.]+\\s*m?" }
+      ],
+      "format": "{severity} {range}",
+      "aggregation": "default"
+    },
+
+    "分岐部・付根の異常": {
+      "guideline": "亀裂・入り皮・腐朽・空洞等の状況",
+      "style": "parens_or_fulltext",
+      "aggregation": "default"
+    },
+
+    "胴枯れなどの病害": {
+      "guideline": "種類等",
+      "style": "parens_or_fulltext",
+      "aggregation": "default"
+    },
+
+    "虫穴・虫フン・ヤニ": {
+      "guideline": "種類等",
+      "style": "parens_or_fulltext",
+      "aggregation": "default"
+    },
+
+    "根元の揺らぎ": {
+      "guideline": "揺らぎの程度（大小）",
+      "style": "pattern_format",
+      "fields": [
+        { "name": "severity", "regex": "(大|中|小)" }
+      ],
+      "format": "{severity}",
+      "aggregation": "default"
+    },
+
+    "鋼棒貫入異常": {
+      "guideline": "鋼棒貫入の深さ（cm）、芯に達している場合は「芯達」",
+      "style": "first_match",
+      "mode": "priority",
+      "_comment": "芯達を最優先（位置に関わらず）。なければ深さcm",
+      "patterns": [
+        { "regex": "芯達" },
+        { "regex": "[\\d\\.]+\\s*cm" }
+      ],
+      "aggregation": "default"
+    },
+
+    "巻き根": {
+      "guideline": "切除の可否",
+      "style": "first_match",
+      "patterns": [
+        { "regex": "切除\\s*不可" },
+        { "regex": "切除\\s*可" },
+        { "regex": "不可" },
+        { "regex": "可" }
+      ],
+      "aggregation": "default"
+    },
+
+    "ルートカラー見えない": {
+      "guideline": "深植えや盛土の深さ（cm）・高さ（cm）",
+      "style": "first_match",
+      "_comment": "先勝ち：textbox内で先に出てきたパターンを採用",
+      "patterns": [
+        { "regex": "深植え\\s*[\\d\\.]+\\s*cm" },
+        { "regex": "盛土\\s*[\\d\\.]+\\s*cm" }
+      ],
+      "aggregation": "default"
+    },
+
+    "露出根被害": {
+      "guideline": "縦×横の被害部の長さ（cm）",
+      "style": "single_regex",
+      "regex": "[\\d\\.]+\\s*cm\\s*[×x]\\s*[\\d\\.]+\\s*cm",
+      "aggregation": "default"
+    },
+
+    "不自然な傾斜": {
+      "guideline": "方角へ程度",
+      "style": "pattern_format",
+      "fields": [
+        { "name": "direction", "regex": "(北東|北西|南東|南西|北|南|東|西)" },
+        { "name": "severity",  "regex": "(大|中|小)" }
+      ],
+      "format": "{direction}へ{severity}",
+      "aggregation": "default"
+    },
+
+    "枯枝": {
+      "guideline": "元口直径（φ、cm）・長さ（L、m）",
+      "style": "pattern_format",
+      "fields": [
+        { "name": "diameter", "regex": "φ?\\s*[\\d\\.]+\\s*cm" },
+        { "name": "length",   "regex": "L?\\s*[\\d\\.]+\\s*m(?![mc])" }
+      ],
+      "format": "{diameter} {length}",
+      "aggregation": "count_x"
+    },
+
+    "スタブカット": {
+      "guideline": "切除の可否",
+      "style": "first_match",
+      "patterns": [
+        { "regex": "切除\\s*不可" },
+        { "regex": "切除\\s*可" },
+        { "regex": "不可" },
+        { "regex": "可" }
+      ],
+      "aggregation": "count_x"
+    },
+
+    "建築限界越え": {
+      "guideline": "枝: L(m)・GL(m) / 幹: 越え幅(cm)・GL(m)",
+      "style": "part_dependent",
+      "by_part": {
+        "幹": {
+          "style": "pattern_format",
+          "fields": [
+            { "name": "width",  "regex": "[\\d\\.]+\\s*cm" },
+            { "name": "height", "regex": "GL\\s*[\\d\\.]+\\s*m" }
+          ],
+          "format": "{width} {height}"
+        },
+        "大枝": {
+          "style": "pattern_format",
+          "fields": [
+            { "name": "length", "regex": "L\\s*[\\d\\.]+\\s*m" },
+            { "name": "height", "regex": "GL\\s*[\\d\\.]+\\s*m" }
+          ],
+          "format": "{length} {height}"
+        }
+      },
+      "aggregation": "default"
+    }
+  }
+}

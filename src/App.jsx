@@ -4,7 +4,6 @@ import { Leaf, Plus, Trash2, Camera, Download, ChevronLeft, ChevronRight, Save, 
 import { storage } from './lib/storage';
 import { compressImage } from './lib/imageCompress';
 import { formatTreeText, exportJSON, exportXLSX, exportZIP, loadAllTreesWithPhotos } from './lib/exportHelpers';
-import { generateKarteExcel } from './lib/karteGenerator.js';
 import { STORAGE, WINDOW_SIZE, SAVE_DEBOUNCE_MS, PLANTING_FORMS, STAKE_STATES } from './config/constants';
 
 import Section from './components/Section';
@@ -706,17 +705,10 @@ export default function App() {
     setTimeout(() => setSavedFlash(false), 1200);
   }, [flushAllSaves]);
 
-  const handleExportKarte = useCallback(async () => {
+  const getTreesForKarte = useCallback(async () => {
     flushAllSaves();
-    const fullTrees = await loadAllTreesWithPhotos(treeIdsRef.current, allMetaRef.current, loadedPhotosRef.current);
-    try {
-      await generateKarteExcel(fullTrees, surveyMeta, 'shibuya');
-      setShowExport(false);
-    } catch (e) {
-      alert('カルテ生成に失敗しました: ' + e.message);
-      console.error(e);
-    }
-  }, [flushAllSaves, surveyMeta]);
+    return await loadAllTreesWithPhotos(treeIdsRef.current, allMetaRef.current, loadedPhotosRef.current);
+  }, [flushAllSaves]);
 
   const handleExportJSON = useCallback(async () => {
     flushAllSaves();
@@ -1144,7 +1136,8 @@ export default function App() {
           treeCount={treeIds.length}
           totalPhotos={totalPhotos}
           copiedFlash={copiedFlash}
-          onExportKarte={handleExportKarte}
+          getTreesForKarte={getTreesForKarte}
+          surveyMeta={surveyMeta}
           onExportXLSX={handleExportXLSX}
           onExportZIP={handleExportZIP}
           onExportJSON={handleExportJSON}

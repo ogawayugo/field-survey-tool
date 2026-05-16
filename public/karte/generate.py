@@ -1,0 +1,1270 @@
+#!/usr/bin/env python3
+"""
+街路樹診断カルテ生成スクリプト
+
+PWA「街路樹現場調査」からエクスポートしたJSONファイルを入力として、
+渋谷氷川の杜様式の街路樹診断カルテExcelファイルを生成します。
+
+使い方:
+    python generate.py survey.json
+    python generate.py survey.json --template shibuya
+    python generate.py survey.json --output my_karte.xlsx
+
+要件:
+    pip install openpyxl pillow
+
+"""
+
+import argparse
+import base64
+import io
+import json
+import os
+import re
+import sys
+from copy import copy
+from datetime import datetime
+from pathlib import Path
+
+try:
+    from openpyxl import load_workbook
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter, column_index_from_string
+    from openpyxl.worksheet.worksheet import Worksheet
+    from PIL import Image
+    from photo_annotator import annotate_photo, annotate_photo_with_markers
+except ImportError:
+    print("ERROR: 必要なライブラリがインストールされていません。", file=sys.stderr)
+    print("以下を実行してください: pip install openpyxl pillow", file=sys.stderr)
+    sys.exit(1)
+
+
+# ===================================================================
+# 定数
+# ===================================================================
+
+# exe化されたかどうかで取得方法を分岐
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = Path(sys.executable).parent
+else:
+    SCRIPT_DIR = Path(__file__).parent
+TEMPLATES_DIR = SCRIPT_DIR / 'templates'
+
+# 半角→全角変換テーブル
+HALFWIDTH_TO_FULLWIDTH_DIGITS = str.maketrans('12345', '１２３４５')
+
+# A/B1/B2/C → 全角
+ABC_TO_FULLWIDTH = {
+    'A': 'Ａ',
+    'B1': 'Ｂ１',
+    'B2': 'Ｂ２',
+    'C': 'Ｃ',
+}
+
+# A/B1/B2/C → 活力判定の長文ラベル
+ABC_TO_VITALITY_LABEL = {
+    'A': '健全か健全に近い',
+    'B1': '注意すべき被害が見られる',
+    'B2': '著しい被害が見られる',
+    'C': '不健全',
+}
+
+# 標準診断項目リスト（メモから抽出する時の参照）
+KNOWN_DIAGNOSIS_ITEMS = [
+    '樹皮枯死・欠損・腐朽',
+    '開口空洞(芯に達しない)',
+    '開口空洞（芯に達しない）',
+    '開口空洞(芯に達する)',
+    '開口空洞（芯に達する）',
+    'キノコ（子実体）',
+    'キノコ',
+    '木槌打診異常',
+    '分岐部・付根の異常',
+    '胴枯れなどの病害',
+    '虫穴・虫フン・ヤニ',
+    '根元の揺らぎ',
+    '鋼棒貫入異常',
+    '巻き根',
+    'ルートカラー見えない',
+    '露出根被害',
+    '不自然な傾斜',
+    '枯枝',
+    'スタブカット',
+]
+
+
+# ===================================================================
+# ユーティリティ
+# ===================================================================
+
+def log(msg: str):
+    """進捗ログ"""
+    print(f"  {msg}")
+
+
+def err(msg: str):
+    """エラーログ"""
+    print(f"  ERROR: {msg}", file=sys.stderr)
+
+
+def warn(msg: str):
+    """警告ログ"""
+    print(f"  WARN: {msg}", file=sys.stderr)
+
+
+def pt_to_emu(pt: float) -> int:
+    """pt → EMU (English Metric Unit)"""
+    return int(pt * 12700)
+
+
+def pt_to_pixel(pt: float, dpi: int = 96) -> int:
+    """pt → pixel (96 DPI default)"""
+    return int(pt * dpi / 72)
+
+
+def normalize_text(s: str) -> str:
+    """文字列の正規化（全角・半角の括弧を統一）"""
+    if not s:
+        return ''
+    # 全角括弧を半角にして比較しやすくする
+    return s.replace('（', '(').replace('）', ')').strip()
+
+
+def format_date(date_str: str) -> str:
+    """ISO形式の日付を「  YYYY年  MM月  DD日」に変換"""
+    if not date_str:
+        return ''
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})', date_str)
+    if not m:
+        return date_str
+    return f"　　{m.group(1)}年　{int(m.group(2))}月　{int(m.group(3))}日"
+
+
+# ===================================================================
+# テンプレート設定の読み込み
+# ===================================================================
+
+def load_template_config(template_id: str) -> dict:
+    """テンプレート設定JSONを読み込む"""
+    config_path = TEMPLATES_DIR / f"{template_id}.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"テンプレート設定が見つかりません: {config_path}")
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def get_template_excel_path(config: dict) -> Path:
+    """テンプレートExcelファイルのパスを返す"""
+    return TEMPLATES_DIR / config['template_file']
+
+
+# ===================================================================
+# メモから部位ごとの項目を抽出
+# ===================================================================
+
+def parse_memo_to_parts(memo: str) -> dict:
+    """
+    現場メモを部位ごとに分割する。
+    入力例: "根元:キノコ（子実体）、露出根被害5×20cm\n幹:樹皮欠損2×3cm"
+    出力: {"根元": ["キノコ（子実体）", "露出根被害5×20cm"], "幹": [...], "大枝": [...]}
+    """
+    result = {'根元': [], '幹': [], '大枝': [], '_free': []}
+    if not memo:
+        return result
+
+    lines = [line.strip() for line in memo.split('\n') if line.strip()]
+    for line in lines:
+        # 「部位:」「部位：」「部位 :」など寛容にマッチ
+        m = re.match(r'^(根元|幹|大枝|枝)\s*[:：]\s*(.*)', line)
+        if m:
+            part = m.group(1)
+            if part == '枝':
+                part = '大枝'
+            content = m.group(2).strip()
+            if content:
+                # 読点で分割して各項目に
+                items = [s.strip() for s in re.split(r'[、,]', content) if s.strip()]
+                # 連続した「、、」で出来る空文字列も除去済み
+                result[part].extend(items)
+        else:
+            # 部位ラベルなしの行
+            result['_free'].append(line)
+    return result
+
+
+def extract_diagnosis_item_name(text: str) -> str:
+    """
+    項目名と寸法が混ざった文字列から、項目名部分だけを取り出す
+    例: "樹皮枯死・欠損・腐朽5×20cm" → "樹皮枯死・欠損・腐朽"
+    例: "開口空洞（芯に達しない）4×5cm" → "開口空洞（芯に達しない）"
+    例: "傾斜・小（南方向）" → "不自然な傾斜"（キーワードマッチ）
+    """
+    if not text:
+        return ''
+    text = text.strip()
+    # 完全一致を優先
+    for item in KNOWN_DIAGNOSIS_ITEMS:
+        if text == item:
+            return item
+    # 前方一致
+    for item in KNOWN_DIAGNOSIS_ITEMS:
+        if text.startswith(item):
+            return item
+    # キーワードマッチ（項目名が現場での略記とずれる場合の救済）
+    keyword_map = {
+        '傾斜': '不自然な傾斜',
+        '揺らぎ': '根元の揺らぎ',
+        '揺れ': '根元の揺らぎ',
+        '鋼棒': '鋼棒貫入異常',
+        '貫入': '鋼棒貫入異常',
+        '巻き根': '巻き根',
+        '露出根': '露出根被害',
+        '根の切断': '露出根被害',
+        '根切断': '露出根被害',
+        'ルートカラー': 'ルートカラー見えない',
+        '深植': 'ルートカラー見えない',
+        '盛土': 'ルートカラー見えない',
+        '枯枝': '枯枝',
+        'スタブ': 'スタブカット',
+        'キノコ': 'キノコ（子実体）',
+        '子実体': 'キノコ（子実体）',
+        'ベッコウタケ': 'キノコ（子実体）',
+        'コフキ': 'キノコ（子実体)',
+        '打診': '木槌打診異常',
+        '入皮': '分岐部・付根の異常',
+        '分岐': '分岐部・付根の異常',
+        '胴枯': '胴枯れなどの病害',
+        'カミキリ': '虫穴・虫フン・ヤニ',
+        '虫穴': '虫穴・虫フン・ヤニ',
+        '虫フン': '虫穴・虫フン・ヤニ',
+        'ヤニ': '虫穴・虫フン・ヤニ',
+    }
+    for keyword, mapped in keyword_map.items():
+        if keyword in text:
+            return mapped
+    return ''
+
+
+# ===================================================================
+# シート複製（openpyxlの copy_worksheet を使う）
+# ===================================================================
+
+def copy_template_sheet(wb, template_sheet_name: str, new_sheet_name: str) -> Worksheet:
+    """
+    テンプレートシートを複製する。
+    openpyxl の copy_worksheet は同じワークブック内でしか使えないので、
+    workbookごとロードしている前提。
+    """
+    template_sheet = wb[template_sheet_name]
+    new_sheet = wb.copy_worksheet(template_sheet)
+    new_sheet.title = new_sheet_name
+    return new_sheet
+
+
+# ===================================================================
+# データ書き込み
+# ===================================================================
+
+def write_basic_info(sheet: Worksheet, tree: dict, survey_meta: dict, config: dict):
+    """基本情報の書き込み"""
+    bi = config['basic_info']
+
+    mapping = {
+        'tree_number': tree.get('treeNumber', ''),
+        'species': tree.get('species', ''),
+        'height': tree.get('height', ''),
+        'girth': tree.get('girth', ''),
+        'spread': tree.get('spread', ''),
+        'route': survey_meta.get('route', ''),
+        'diagnostician': survey_meta.get('diagnostician', ''),
+        'date': format_date(survey_meta.get('date', '')),
+    }
+
+    for key, cell_addr in bi.items():
+        value = mapping.get(key, '')
+        if value != '':
+            sheet[cell_addr] = value
+
+
+def update_cell_checkbox(text: str, options: list, selected: str) -> str:
+    """
+    セル内文字列の中の □XXX を ■XXX に置換
+    例: "□単独桝 □植栽帯 □緑地内 □その他" → "□単独桝 □植栽帯 ■緑地内 □その他"
+    """
+    if not selected or selected not in options:
+        return text
+
+    escaped = re.escape(selected)
+    pattern = re.compile(r'□(\s*)' + escaped)
+    if pattern.search(text):
+        return pattern.sub(r'■\1' + selected, text)
+
+    # フォールバック：単純置換
+    return text.replace(f'□{selected}', f'■{selected}')
+
+
+def write_cell_checkboxes(sheet: Worksheet, tree: dict, config: dict):
+    """セル内チェックボックス（複数選択肢から1つを ■）"""
+    cb_config = config['cell_checkboxes']
+
+    mapping = {
+        'planting_form': tree.get('plantingForm', ''),
+        'stake': tree.get('stake', ''),
+        'vitality_sei': tree.get('vitalitySei', ''),
+        'vitality_kei': tree.get('vitalityKei', ''),
+        'vitality_judgment': tree.get('vitalityJudgment', ''),
+        'appearance_judgment': tree.get('appearanceJudgment', ''),
+    }
+
+    for key, def_obj in cb_config.items():
+        raw_value = mapping.get(key, '')
+        if not raw_value:
+            continue
+
+        # 入力値の変換
+        convert = def_obj.get('convert_input')
+        if convert == 'halfwidth_to_fullwidth':
+            value = str(raw_value).translate(HALFWIDTH_TO_FULLWIDTH_DIGITS)
+        elif convert == 'abc_to_fullwidth':
+            value = ABC_TO_FULLWIDTH.get(raw_value, '')
+        elif convert == 'abc_to_label':
+            value = ABC_TO_VITALITY_LABEL.get(raw_value, '')
+        else:
+            value = raw_value
+
+        if not value:
+            continue
+
+        cell_addr = def_obj['cell']
+        original = sheet[cell_addr].value
+        if original is None:
+            continue
+
+        new_text = update_cell_checkbox(str(original), def_obj['options'], value)
+        if new_text != original:
+            sheet[cell_addr] = new_text
+
+
+def write_part_judgments(sheet: Worksheet, tree: dict, config: dict):
+    """部位判定マトリクスの書き込み"""
+    part_judgments = tree.get('partJudgments', {})
+    if not part_judgments:
+        return
+
+    cells_map = config['part_judgment_cells']
+
+    for part, judgment in part_judgments.items():
+        if not judgment:
+            continue
+        if part not in cells_map:
+            continue
+        cell_addr = cells_map[part].get(judgment)
+        if not cell_addr:
+            continue
+        original = sheet[cell_addr].value
+        if original is None:
+            continue
+        # □ を ■ に置換
+        new_text = str(original).replace('□', '■', 1)
+        sheet[cell_addr] = new_text
+
+
+def set_cell_checkbox(text: str, selected: str) -> str:
+    """
+    セル内の全チェックボックスを□にリセットし、指定された選択肢だけ■にする。
+    例: "□なし□あり（" + selected="なし" → "■なし□あり（"
+    例: "□なし□あり（" + selected="あり" → "□なし■あり（"
+    """
+    if not text:
+        return text
+    # 全て□にリセット
+    result = text.replace('■', '□')
+    # 指定された選択肢を■に
+    escaped = re.escape(selected)
+    pattern = re.compile(r'□(\s*)' + escaped)
+    if pattern.search(result):
+        result = pattern.sub(lambda m: '■' + m.group(1) + selected, result)
+    return result
+
+
+def get_negative_checkbox_text(checkbox_text: str) -> str:
+    """正のチェックボックステキストから対応する否定テキストを返す"""
+    if checkbox_text == '見えない':
+        return '見える'
+    return 'なし'
+
+
+def write_diagnosis_checkboxes(sheet: Worksheet, tree: dict, config: dict):
+    """部位診断のチェックボックス
+
+    - デフォルトで全項目の「なし」に■をつける
+    - 所見（メモ）に該当する病害チップがある場合、その部位×項目の「あり」に■をつけ「なし」を□にする
+    """
+    memo = tree.get('memo', '')
+    parts_items = parse_memo_to_parts(memo) if memo else {'根元': [], '幹': [], '大枝': [], '_free': []}
+
+    diagnosis_rows = config['diagnosis_rows']
+    part_columns = config['part_columns']
+    skip_items = set(config.get('skip_diagnosis_items', []))
+
+    # メモから見つかった (部位, 正規化項目名) のセットを構築
+    found_set = set()
+    for part, items in parts_items.items():
+        if part == '_free':
+            continue
+        for item_text in items:
+            item_name = extract_diagnosis_item_name(item_text)
+            if not item_name:
+                continue
+            normalized = item_name.replace('(', '（').replace(')', '）')
+            if normalized in diagnosis_rows:
+                row_def = diagnosis_rows[normalized]
+                if isinstance(row_def, dict):
+                    only_part = row_def.get('only_part')
+                    # only_part指定がある場合はその部位に強制マッピング
+                    if only_part:
+                        found_set.add((only_part, normalized))
+                    else:
+                        found_set.add((part, normalized))
+                else:
+                    found_set.add((part, normalized))
+
+    # 全診断行×部位を処理
+    for item_name, row_def in diagnosis_rows.items():
+        if item_name in skip_items:
+            continue
+
+        if isinstance(row_def, dict):
+            row = row_def['row']
+            only_part = row_def.get('only_part')
+            checkbox_text = row_def.get('checkbox_text', 'あり')
+            col_override = row_def.get('column_override')
+        else:
+            row = row_def
+            only_part = None
+            checkbox_text = 'あり'
+            col_override = None
+
+        negative_text = get_negative_checkbox_text(checkbox_text)
+
+        # この項目が適用される部位リスト
+        if only_part:
+            parts_to_process = [only_part]
+        else:
+            parts_to_process = list(part_columns.keys())
+
+        for part in parts_to_process:
+            if only_part:
+                col = col_override or part_columns.get(only_part, '')
+            else:
+                col = part_columns.get(part, '')
+
+            if not col:
+                continue
+
+            cell_addr = f"{col}{row}"
+            original = sheet[cell_addr].value
+            if original is None:
+                continue
+
+            text = str(original)
+            is_found = (part, item_name) in found_set
+
+            if is_found:
+                # 該当する病害が所見にある → あり（正）に■、なし（否）を□
+                new_text = set_cell_checkbox(text, checkbox_text)
+            else:
+                # 該当する病害が所見にない → なし（否）に■、あり（正）を□
+                new_text = set_cell_checkbox(text, negative_text)
+
+            if new_text != str(original):
+                sheet[cell_addr] = new_text
+
+
+def write_shoken(sheet: Worksheet, tree: dict, config: dict):
+    """
+    所見欄に書き込み（PWA の所見パネルそのまま転記）
+
+    フォーマット：
+        ■ 根元
+        　マーカー1のtext
+        　マーカー2のtext
+        ■ 幹
+        　...
+        ■ 大枝
+        　...
+        ▼ 補足メモ
+        　memoSupplement（あれば）
+
+    マーカーは作成順、補足メモが空なら見出しごと省略。
+    マーカーが1つもなく memo にもデータがある場合は旧仕様（部位:項目）にフォールバック。
+    """
+    markers = tree.get('markers', []) or []
+    memo_supplement = tree.get('memoSupplement', '') or ''
+
+    lines = []
+
+    if markers:
+        # 部位ごとにマーカーを作成順でグルーピング
+        from collections import OrderedDict
+        part_order = ['根元', '幹', '大枝']
+        grouped = OrderedDict((p, []) for p in part_order)
+        for m in markers:
+            part = m.get('part')
+            if part not in grouped:
+                continue
+            text = (m.get('text') or m.get('item') or '').strip()
+            if text:
+                grouped[part].append(text)
+
+        for part_label in part_order:
+            items = grouped[part_label]
+            if not items:
+                continue
+            lines.append(f"■ {part_label}")
+            for t in items:
+                # text 内の改行を維持しつつ、各行に全角スペースの字下げ
+                for sub in t.split('\n'):
+                    lines.append(f"　{sub}")
+
+        # 補足メモ（あれば末尾に）
+        if memo_supplement.strip():
+            if lines:
+                lines.append("")  # 空行で区切る
+            lines.append("▼ 補足メモ")
+            for sub in memo_supplement.split('\n'):
+                lines.append(f"　{sub}")
+
+    else:
+        # フォールバック：旧仕様（tree.memo を部位別パース）
+        memo = tree.get('memo', '')
+        if memo:
+            parts = parse_memo_to_parts(memo)
+            for part_label, key in [('根元', '根元'), ('幹', '幹'), ('大枝', '大枝')]:
+                items = parts.get(key, [])
+                if items:
+                    lines.append(f"{part_label}：{('、').join(items)}")
+            if parts.get('_free'):
+                lines.extend(parts['_free'])
+
+    if not lines:
+        return
+
+    shoken_cfg = config['shoken']
+    first_cell = shoken_cfg['first_cell']
+    text = '\n'.join(lines)
+    sheet[first_cell] = text
+
+    # セル内改行のため wrap_text を有効化
+    cell = sheet[first_cell]
+    if cell.alignment:
+        from openpyxl.styles import Alignment
+        new_alignment = Alignment(
+            horizontal=cell.alignment.horizontal,
+            vertical=cell.alignment.vertical or 'top',
+            wrap_text=True,
+            indent=cell.alignment.indent,
+        )
+        cell.alignment = new_alignment
+
+
+def write_judgment_reason(sheet: Worksheet, tree: dict, config: dict):
+    """判定理由（F48 エリア）に外観診断理由を書き込み"""
+    reason = (tree.get('appearanceReason') or '').strip()
+    if not reason:
+        return
+
+    cell_addr = config.get('judgment_reason_cell')
+    if not cell_addr:
+        return
+
+    sheet[cell_addr] = reason
+
+    # 改行・折り返し対応
+    cell = sheet[cell_addr]
+    if cell.alignment:
+        from openpyxl.styles import Alignment
+        cell.alignment = Alignment(
+            horizontal=cell.alignment.horizontal or 'left',
+            vertical=cell.alignment.vertical or 'top',
+            wrap_text=True,
+            indent=cell.alignment.indent or 0,
+        )
+
+
+def write_three_choice_circumference(sheet: Worksheet, tree: dict, config: dict):
+    """3択項目（周囲長比率）の書き込み（v3.3）
+
+    PWAの threeChoiceJudgments データに基づいて、該当セルの選択肢に■を付ける。
+    """
+    three_choice_config = config.get('three_choice_circumference')
+    if not three_choice_config:
+        return
+
+    three_choice_data = tree.get('threeChoiceJudgments', {})
+
+    # 内部キー → Excelラベルの対応
+    KEY_TO_LABEL = {
+        'none': 'なし',
+        'less_third': '1/3未満',
+        'more_third': '1/3以上',
+    }
+
+    for item_key in ['barkDeath', 'cavityShallow', 'cavityDeep']:
+        if item_key not in three_choice_config:
+            continue
+
+        for part_key in ['root', 'trunk', 'branch']:
+            cell_addr = three_choice_config[item_key].get(part_key)
+            if not cell_addr:
+                continue
+
+            # データ取得（未入力なら 'none' をデフォルト）
+            selected = three_choice_data.get(part_key, {}).get(item_key)
+            if not selected:
+                selected = 'none'
+
+            # 有効なキーでなければ 'none' にフォールバック
+            if selected not in KEY_TO_LABEL:
+                selected = 'none'
+
+            original = sheet[cell_addr].value
+            if original is None:
+                continue
+
+            # セルテキスト内の選択された値だけ■、他は□
+            new_text = set_cell_checkbox(str(original), KEY_TO_LABEL[selected])
+            if new_text != str(original):
+                sheet[cell_addr] = new_text
+
+
+def write_overall_judgment(sheet: Worksheet, tree: dict, config: dict):
+    """総合判定の書き込み（v3.2）"""
+    # チェックボックス（G60: □Ａ：... □Ｂ１：... □Ｂ２：... □Ｃ：...）
+    oj_config = config.get('overall_judgment')
+    if oj_config:
+        overall = tree.get('overallJudgment', '')
+        if overall:
+            value = ABC_TO_FULLWIDTH.get(overall, '')
+        else:
+            value = ''
+        cell_addr = oj_config['cell']
+        original = sheet[cell_addr].value
+        if original is not None:
+            new_text = update_cell_checkbox(str(original), oj_config['options'], value)
+            if new_text != str(original):
+                sheet[cell_addr] = new_text
+
+    # 判定理由テキスト
+    reason_cell = config.get('overall_reason_cell')
+    if reason_cell:
+        reason = tree.get('overallReason', '')
+        if reason:
+            sheet[reason_cell] = reason
+            # wrap_text 有効化
+            from openpyxl.styles import Alignment
+            cell = sheet[reason_cell]
+            if cell.alignment:
+                cell.alignment = Alignment(
+                    horizontal=cell.alignment.horizontal,
+                    vertical=cell.alignment.vertical or 'top',
+                    wrap_text=True,
+                    indent=cell.alignment.indent,
+                )
+
+
+# ===================================================================
+# 処置内容・次回診断・位置座標
+# ===================================================================
+
+def _replace_checkbox_in_text(text: str, target: str) -> str:
+    """セル内テキストの □target を ■target に置換。target が見つからなければ元のまま。"""
+    if not text or not target:
+        return text
+    escaped = re.escape(target)
+    pattern = re.compile(r'□(\s*)' + escaped)
+    if pattern.search(text):
+        # group 参照との衝突を避けるため lambda で置換
+        return pattern.sub(lambda m: '■' + m.group(1) + target, text)
+    # フォールバック
+    return text.replace(f'□{target}', f'■{target}')
+
+
+def write_treatment(sheet: Worksheet, tree: dict, config: dict):
+    """処置内容セクションの書き込み"""
+    treatment = tree.get('treatment')
+    if not treatment:
+        return
+
+    t_config = config.get('treatment')
+    if not t_config:
+        return
+
+    # 必要性（BD3：□なし □あり）
+    necessity = treatment.get('necessity', '')
+    if necessity in ('なし', 'あり'):
+        cell = t_config.get('necessity_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                sheet[cell] = _replace_checkbox_in_text(str(original), necessity)
+
+    # 緊急性（BY3）
+    urgency = treatment.get('urgency', '')
+    if urgency in ('なし', 'あり'):
+        cell = t_config.get('urgency_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                sheet[cell] = _replace_checkbox_in_text(str(original), urgency)
+
+    # 要観察（AX4）
+    obs = treatment.get('observation', '')
+    if obs in ('長期周期', '短期周期'):
+        cell = t_config.get('observation_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is not None:
+                target = f'要観察（{obs}）'
+                new_text = _replace_checkbox_in_text(str(original), target)
+                # フォールバック：「要観察(...)」形式の半角括弧バージョンも試す
+                if new_text == str(original):
+                    target_h = f'要観察({obs})'
+                    new_text = _replace_checkbox_in_text(str(original), target_h)
+                sheet[cell] = new_text
+
+    # 剪定＋風圧軽減＋スタブカット＋巻き根（AX5：1セル内の複数チェックボックス）
+    cell = t_config.get('pruning_combined_cell')
+    if cell:
+        original = sheet[cell].value
+        if original is not None:
+            text = str(original)
+            selected_options = []
+            if treatment.get('pruning'):
+                selected_options.append('剪定')
+                for p in treatment.get('pruning', []):
+                    selected_options.append(p)
+            if treatment.get('pressureReduction'):
+                selected_options.append('風圧軽減')
+            if treatment.get('stubCut'):
+                selected_options.append('スタブカット')
+            if treatment.get('rootCircling'):
+                selected_options.append('巻き根')
+            for opt in selected_options:
+                text = _replace_checkbox_in_text(text, opt)
+            if text != str(original):
+                sheet[cell] = text
+
+    # 個別処置（AX6, BR6, AX7, BR7, AX8, BR8）
+    # ラベルセルは □→■ 置換のみ。注釈は別途 note_cell に書き込む。
+    individual_cfg = t_config.get('individual', {})
+    individual_data = treatment.get('individual', {}) or {}
+    for key, def_obj in individual_cfg.items():
+        item = individual_data.get(key, {}) or {}
+        if not item.get('checked'):
+            continue
+        target_cell = def_obj.get('cell')
+        label = def_obj.get('label', '')
+        note_cell = def_obj.get('note_cell')
+        if not target_cell or not label:
+            continue
+        original = sheet[target_cell].value
+        if original is None:
+            continue
+        # ラベルセル：□→■ 置換のみ（noteは挿入しない）
+        sheet[target_cell] = _replace_checkbox_in_text(str(original), label)
+        # 注釈：別セルへ書き込み
+        note = item.get('note', '') or ''
+        if note and note_cell:
+            sheet[note_cell] = note
+
+    # 摘要（AX9：ラベルセルに上書きせず、補足を含めて記入）
+    summary = treatment.get('summary', '') or ''
+    if summary:
+        cell = t_config.get('summary_cell')
+        if cell:
+            original = sheet[cell].value
+            if original is None or '摘要' not in str(original):
+                # 別セル想定。直接書き込み
+                sheet[cell] = summary
+            else:
+                # 「摘要」ラベルセル：後ろに改行して摘要内容を付加
+                sheet[cell] = f"{original}\n{summary}"
+
+
+def write_next_diagnosis(sheet: Worksheet, tree: dict, config: dict):
+    """次回診断セクションの書き込み"""
+    nd = tree.get('nextDiagnosis')
+    timing = tree.get('nextDiagnosisTiming')
+    nd_config = config.get('next_diagnosis')
+    if not nd_config:
+        return
+
+    # 次回診断（main_cell）BD62 にフォローアップ / 外観診断 のチェック
+    if nd:
+        main_cell = nd_config.get('main_cell')
+        if main_cell:
+            original = sheet[main_cell].value
+            if original is not None:
+                text = str(original)
+                if nd.get('followUp'):
+                    text = _replace_checkbox_in_text(text, 'フォローアップ診断')
+                if nd.get('appearance'):
+                    text = _replace_checkbox_in_text(text, '外観診断')
+                # 要機器診断は main_cell に含まれる場合と instrumental_site_cell に分かれる場合の両対応
+                if nd.get('instrumental', {}).get('checked'):
+                    text = _replace_checkbox_in_text(text, '要機器診断')
+                if text != str(original):
+                    sheet[main_cell] = text
+
+        # 要機器診断＋部位（BL62）
+        if nd.get('instrumental', {}).get('checked'):
+            site_cell = nd_config.get('instrumental_site_cell')
+            if site_cell:
+                original = sheet[site_cell].value
+                if original is not None:
+                    text = str(original)
+                    text = _replace_checkbox_in_text(text, '要機器診断')
+                    site = nd.get('instrumental', {}).get('site', '') or ''
+                    if site:
+                        # 「測定部位：」「測定部位:」の後ろに部位を挿入
+                        if '測定部位：' in text:
+                            # 行末まで or 既存値置換
+                            text = re.sub(r'(測定部位：)[^\n]*', r'\1' + site, text)
+                        elif '測定部位:' in text:
+                            text = re.sub(r'(測定部位:)[^\n]*', r'\1' + site, text)
+                        else:
+                            text = f"{text} 測定部位：{site}"
+                    sheet[site_cell] = text
+
+    # 再診断時期（BD63）
+    if timing:
+        years = timing.get('years')
+        if years in (1, 2, 3):
+            timing_cell = nd_config.get('timing_cell')
+            if timing_cell:
+                original = sheet[timing_cell].value
+                if original is not None:
+                    target = f'{years}年後'
+                    new_text = _replace_checkbox_in_text(str(original), target)
+                    # 年度が指定されていれば、N年後（...）の括弧内に挿入（全角/半角両対応）
+                    if timing.get('fiscalYear'):
+                        fy = timing.get('fiscalYear')
+                        pat_full = re.compile(rf'(■?{years}年後)（[^）]*）')
+                        if pat_full.search(new_text):
+                            new_text = pat_full.sub(f'■{years}年後（{fy}年度）', new_text)
+                        else:
+                            pat_half = re.compile(rf'(■?{years}年後)\([^)]*\)')
+                            if pat_half.search(new_text):
+                                new_text = pat_half.sub(f'■{years}年後({fy}年度)', new_text)
+                    if new_text != str(original):
+                        sheet[timing_cell] = new_text
+
+
+def write_location(sheet: Worksheet, tree: dict, config: dict):
+    """位置座標セクションの書き込み"""
+    loc = tree.get('location')
+    if not loc:
+        return
+    loc_config = config.get('location')
+    if not loc_config:
+        return
+
+    lat = loc.get('latitude', '')
+    lon = loc.get('longitude', '')
+
+    lat_cell = loc_config.get('latitude_cell')
+    if lat_cell and lat:
+        original = sheet[lat_cell].value
+        # ラベル「緯度」が含まれていれば連結、そうでなければ上書き
+        if original is None or '緯度' not in str(original):
+            sheet[lat_cell] = lat
+        else:
+            sheet[lat_cell] = f"{original} {lat}"
+
+    lon_cell = loc_config.get('longitude_cell')
+    if lon_cell and lon:
+        original = sheet[lon_cell].value
+        if original is None or '経度' not in str(original):
+            sheet[lon_cell] = lon
+        else:
+            sheet[lon_cell] = f"{original} {lon}"
+
+
+# ===================================================================
+# 部位診断ノート（括弧内）の書き込み
+# ===================================================================
+
+def _load_extraction_rules(config: dict) -> dict:
+    """extraction_rules.json をロード（テンプレートと同じディレクトリ）"""
+    # config から template_file の場所を逆引き
+    template_file = config.get('template_file', 'shibuya.xlsx')
+    # generate.py からの相対で templates/ にあると想定
+    rules_path = Path(__file__).parent / 'templates' / 'extraction_rules.json'
+    if not rules_path.exists():
+        log(f"  抽出ルール JSON が見つかりません: {rules_path}（スキップ）")
+        return {}
+    try:
+        with open(rules_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('rules', {})
+    except Exception as e:
+        warn(f"  抽出ルール JSON 読み込みエラー: {e}")
+        return {}
+
+
+def _apply_shrink_to_fit(cell):
+    """セルに shrink_to_fit を適用（既存のalignment属性を保持）"""
+    try:
+        from openpyxl.styles import Alignment
+        cur = cell.alignment
+        cell.alignment = Alignment(
+            horizontal=cur.horizontal or 'left',
+            vertical=cur.vertical or 'center',
+            text_rotation=cur.text_rotation or 0,
+            wrap_text=False,
+            shrink_to_fit=True,
+            indent=cur.indent or 0,
+        )
+    except Exception:
+        pass
+
+
+def write_diagnosis_notes(sheet: Worksheet, tree: dict, config: dict):
+    """
+    マーカーから (部位×項目) ごとに括弧内ノートを集約し、該当セルへ書き込み。
+
+    マーカーが marker.summary を持っていればそれを優先（PWA側で計算済み）。
+    なければ marker.text または marker.item から抽出する。
+    """
+    markers = tree.get('markers', []) or []
+    if not markers:
+        return
+
+    # 抽出モジュールを読み込み（PWA非依存にするため遅延 import）
+    from collections import defaultdict
+    try:
+        from marker_extractor import extract_summary, aggregate_summaries
+    except ImportError:
+        warn("  marker_extractor が見つからないため部位診断ノートをスキップ")
+        return
+
+    rules = _load_extraction_rules(config)
+    if not rules:
+        return
+
+    diagnosis_rows = config.get('diagnosis_rows', {})
+    note_columns = config.get('note_columns', {})
+
+    # マーカーを (部位, 項目) でグルーピング
+    grouped = defaultdict(list)
+    for m in markers:
+        # range マーカーも含める（木槌打診異常など範囲表現が自然な項目があるため）
+        part = m.get('part')
+        item = m.get('item')
+        if not part or not item:
+            continue
+
+        # 項目名の正規化（半角括弧 → 全角）
+        item_normalized = item.replace('(', '（').replace(')', '）')
+
+        # PWAで計算済みの summary があれば優先
+        if 'summary' in m and m.get('summary'):
+            summary = m['summary']
+        else:
+            text = m.get('text') or item
+            summary = extract_summary(text, item_normalized, rules, part=part)
+
+        if summary:
+            grouped[(part, item_normalized)].append(summary)
+
+    # 各 (部位, 項目) について集約してセルへ書き込み
+    for (part, item), summaries in grouped.items():
+        if item not in diagnosis_rows:
+            continue
+
+        row_def = diagnosis_rows[item]
+        if isinstance(row_def, dict):
+            row = row_def['row']
+            only_part = row_def.get('only_part')
+            note_col_override = row_def.get('note_column_override')
+        else:
+            row = row_def
+            only_part = None
+            note_col_override = None
+
+        # only_part 制約：部位が一致しなければスキップ
+        if only_part and part != only_part:
+            continue
+
+        # ノート書き込み先列の決定
+        col = note_col_override or note_columns.get(part)
+        if not col:
+            continue
+
+        cell_addr = f"{col}{row}"
+
+        # 集約
+        aggregated = aggregate_summaries(summaries, item, rules)
+        if not aggregated:
+            continue
+
+        # 書き込み + shrink_to_fit
+        sheet[cell_addr] = aggregated
+        _apply_shrink_to_fit(sheet[cell_addr])
+
+
+# ===================================================================
+# 写真の埋め込み
+# ===================================================================
+
+def cell_pixel_position(sheet: Worksheet, cell_addr: str) -> tuple:
+    """セルの左上ピクセル座標を計算（おおよそ）"""
+    cell = sheet[cell_addr]
+    col_idx = cell.column  # 1-indexed
+    row_idx = cell.row
+
+    # 列幅をピクセルに変換して累積
+    x = 0
+    for c in range(1, col_idx):
+        col_letter = get_column_letter(c)
+        col_dim = sheet.column_dimensions.get(col_letter)
+        width = col_dim.width if col_dim and col_dim.width else 8.43  # default
+        # Excelの列幅 → pixel: width * 7 + 5 (おおよそ)
+        x += width * 7 + 5
+
+    # 行高をピクセルに変換して累積
+    y = 0
+    for r in range(1, row_idx):
+        row_dim = sheet.row_dimensions.get(r)
+        height = row_dim.height if row_dim and row_dim.height else 15  # default in pt
+        y += pt_to_pixel(height)
+
+    return x, y
+
+
+def embed_photos(sheet: Worksheet, photos: list, config: dict, tree_data: dict = None):
+    """写真をスロットに従って埋め込む"""
+    if not photos:
+        return
+
+    slots = config['photo_slots']
+
+    # 写真ファーストフロー: roleからlabelへのマッピング
+    ROLE_TO_LABEL = {
+        'main': '樹木全体',
+        'closeup1': 'クローズアップ1',
+        'closeup2': 'クローズアップ2',
+        'closeup3': 'クローズアップ3',
+    }
+
+    # マーカーデータ（tree_dataから取得）
+    markers = (tree_data or {}).get('markers', [])
+
+    for photo in photos:
+        # roleベースまたはlabelベースでスロット決定
+        role = photo.get('role', '')
+        label = photo.get('label', '')
+        # roleがある場合はroleからlabelに変換
+        if role and role in ROLE_TO_LABEL:
+            label = ROLE_TO_LABEL[role]
+        if not label or label not in slots:
+            continue
+
+        data_url = photo.get('dataUrl', '')
+        m = re.match(r'^data:image/\w+;base64,(.+)$', data_url)
+        if not m:
+            continue
+
+        try:
+            img_bytes = base64.b64decode(m.group(1))
+
+            # 写真ファーストフロー: メイン写真にマーカー焼き込み（黒+白フチ）
+            if role == 'main' and markers:
+                annotated_buf = annotate_photo_with_markers(
+                    io.BytesIO(img_bytes), markers, output_format="PNG"
+                )
+                pil_img = Image.open(annotated_buf)
+            # 旧形式: 全景写真のアノテーション焼き込み
+            elif label == '樹木全体':
+                annotations = photo.get('annotations', [])
+                if annotations:
+                    annotated_buf = annotate_photo(io.BytesIO(img_bytes), annotations, output_format="PNG")
+                    pil_img = Image.open(annotated_buf)
+                else:
+                    pil_img = Image.open(io.BytesIO(img_bytes))
+            else:
+                pil_img = Image.open(io.BytesIO(img_bytes))
+
+            slot = slots[label]
+            target_w = pt_to_pixel(slot['width_pt'])
+            target_h = pt_to_pixel(slot['height_pt'])
+
+            # アスペクト比を保つ場合
+            if slot.get('keep_aspect_ratio'):
+                pil_img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+            else:
+                pil_img = pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+            # PIL → openpyxl Image
+            buf = io.BytesIO()
+            pil_img.save(buf, format='PNG')
+            buf.seek(0)
+            xl_img = XLImage(buf)
+            xl_img.width = target_w
+            xl_img.height = target_h
+
+            # アンカーセルに配置
+            anchor_cell = slot['anchor_cell']
+            xl_img.anchor = anchor_cell
+            sheet.add_image(xl_img)
+
+        except Exception as e:
+            warn(f"写真の埋め込みに失敗 (label={label}): {e}")
+
+
+# ===================================================================
+# メイン処理
+# ===================================================================
+
+def generate_karte(json_path: Path, output_path: Path, template_id: str):
+    """カルテExcel生成のメイン処理"""
+
+    # JSON読み込み
+    log(f"JSONを読み込み中: {json_path}")
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    survey_meta = data.get('surveyMeta', {})
+    trees = data.get('trees', [])
+
+    if not trees:
+        err("樹データが見つかりません")
+        return
+
+    log(f"樹木数: {len(trees)}")
+    total_photos = sum(len(t.get('photos', [])) for t in trees)
+    log(f"写真総数: {total_photos}")
+
+    # テンプレート設定の読み込み
+    log(f"テンプレート '{template_id}' を読み込み中...")
+    config = load_template_config(template_id)
+    template_path = get_template_excel_path(config)
+    if not template_path.exists():
+        err(f"テンプレートExcelが見つかりません: {template_path}")
+        return
+
+    # ワークブックを開く
+    wb = load_workbook(template_path)
+    template_sheet_name = config['sheet_name']
+
+    if template_sheet_name not in wb.sheetnames:
+        err(f"テンプレートシート '{template_sheet_name}' が見つかりません")
+        return
+
+    # 各樹について処理
+    for i, tree in enumerate(trees):
+        tree_no = tree.get('treeNumber') or str(i + 1)
+        sheet_name = str(tree_no)[:31]  # Excelシート名は最大31文字
+
+        # シート名重複対策
+        original_name = sheet_name
+        suffix = 2
+        while sheet_name in wb.sheetnames:
+            sheet_name = f"{original_name}_{suffix}"
+            suffix += 1
+
+        log(f"[{i+1}/{len(trees)}] 樹木 #{tree_no} ({tree.get('species', '')}) を処理中...")
+
+        # シート複製
+        new_sheet = copy_template_sheet(wb, template_sheet_name, sheet_name)
+
+        # データ書き込み
+        try:
+            write_basic_info(new_sheet, tree, survey_meta, config)
+            write_cell_checkboxes(new_sheet, tree, config)
+            write_part_judgments(new_sheet, tree, config)
+            write_diagnosis_checkboxes(new_sheet, tree, config)
+            write_diagnosis_notes(new_sheet, tree, config)
+            write_three_choice_circumference(new_sheet, tree, config)
+            write_shoken(new_sheet, tree, config)
+            write_judgment_reason(new_sheet, tree, config)
+            write_overall_judgment(new_sheet, tree, config)
+            write_treatment(new_sheet, tree, config)
+            write_next_diagnosis(new_sheet, tree, config)
+            write_location(new_sheet, tree, config)
+
+            # 写真埋め込み
+            photos = tree.get('photos', [])
+            if photos:
+                embed_photos(new_sheet, photos, config, tree_data=tree)
+        except Exception as e:
+            err(f"樹木 #{tree_no} の処理中にエラー: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # 元のテンプレートシート（白紙）を削除
+    if template_sheet_name in wb.sheetnames:
+        del wb[template_sheet_name]
+
+    # 保存
+    log(f"カルテを保存中: {output_path}")
+    wb.save(output_path)
+    log("完了！")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='街路樹現場調査JSONからカルテExcelを生成',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='例: python generate.py survey_2026-05-01.json'
+    )
+    parser.add_argument('json_file', help='PWAからエクスポートしたJSONファイル')
+    parser.add_argument('--template', '-t', default='shibuya', help='テンプレートID (デフォルト: shibuya)')
+    parser.add_argument('--output', '-o', help='出力ファイル名 (省略時はJSONと同名で.xlsx)')
+
+    args = parser.parse_args()
+
+    # 入力ファイルパス
+    json_path = Path(args.json_file).resolve()
+    if not json_path.exists():
+        print(f"ERROR: JSONファイルが見つかりません: {json_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # 出力ファイルパス
+    if args.output:
+        output_path = Path(args.output).resolve()
+    else:
+        # JSONと同じ場所に、同じベース名で .xlsx を作る
+        base = json_path.stem
+        # "survey_" プレフィックスは削除
+        if base.startswith('survey_'):
+            base = 'karte_' + base[7:]
+        else:
+            base = 'karte_' + base
+        output_path = json_path.parent / f"{base}.xlsx"
+
+    print()
+    print("=" * 50)
+    print("街路樹診断カルテ生成スクリプト")
+    print("=" * 50)
+    print()
+
+    try:
+        generate_karte(json_path, output_path, args.template)
+    except Exception as e:
+        print(f"\nERROR: 処理中にエラーが発生しました: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    print()
+    print("=" * 50)
+    print(f"生成完了: {output_path}")
+    print("=" * 50)
+    print()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,7 +1,8 @@
 import { memo } from 'react';
-import { X, FileJson, FileSpreadsheet, Package, Copy, Check, TreeDeciduous } from 'lucide-react';
+import { X, FileJson, FileSpreadsheet, Package, Copy, Check } from 'lucide-react';
+import KarteExportButton from './KarteExportButton';
 
-export default memo(function ExportModal({ treeCount, totalPhotos, copiedFlash, onExportKarte, onExportXLSX, onExportZIP, onExportJSON, onCopyText, onClose }) {
+export default memo(function ExportModal({ treeCount, totalPhotos, copiedFlash, getTreesForKarte, surveyMeta, onExportXLSX, onExportZIP, onExportJSON, onCopyText, onClose }) {
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center p-4" style={{ background: 'rgba(40, 30, 20, 0.5)' }}>
       <div className="bg-white border border-stone-300 max-w-md w-full max-h-[90vh] overflow-y-auto">
@@ -15,13 +16,13 @@ export default memo(function ExportModal({ treeCount, totalPhotos, copiedFlash, 
           </button>
         </div>
         <div className="p-5 space-y-3">
-          <button onClick={onExportKarte} className="w-full p-4 border border-stone-300 hover:border-emerald-700 hover:bg-emerald-50 transition-colors text-left flex items-start gap-3">
-            <TreeDeciduous className="w-5 h-5 text-emerald-900 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-medium text-sm">カルテ Excel（完成形）</div>
-              <div className="text-[11px] text-stone-500 mt-0.5">各樹を1シートとして街路樹診断カルテに展開。チェックボックス・所見・写真まで自動配置。重め（数MB〜数十MB）。</div>
-            </div>
-          </button>
+          <KarteExportButton
+            getTrees={getTreesForKarte}
+            surveyMeta={surveyMeta}
+            disabled={treeCount === 0}
+            onDone={onClose}
+          />
+
           <button onClick={onExportXLSX} className="w-full p-4 border border-stone-300 hover:border-emerald-700 hover:bg-emerald-50 transition-colors text-left flex items-start gap-3">
             <FileSpreadsheet className="w-5 h-5 text-emerald-900 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
